@@ -1,6 +1,6 @@
 # Agent Rules — Cric-Lab Backend Memory Bank
 
-How the agent should behave in the **criclab-backend** repo.
+How the agent should behave in the **criclab-web-backend** repo.
 
 ## Session start (mandatory)
 
@@ -12,7 +12,7 @@ How the agent should behave in the **criclab-backend** repo.
    - Relevant `tasks/`
    - These `agent-rules/`
 2. Summarize goals, constraints, and gaps **before** coding when the task is large.
-3. Do **not** invent Notera notes/PWA patterns, Hybrid CRM, or Next.js-as-frontend defaults — this product is **Cric-Lab** (FastAPI BE; UI is the sibling `criclab-frontend` repo).
+3. Do **not** invent Notera notes/PWA patterns, Hybrid CRM, or Next.js-as-frontend defaults — this product is **Cric-Lab** (FastAPI BE; UI is the sibling `criclab-web-frontend` repo).
 
 ## Context over prompts
 
@@ -45,7 +45,7 @@ For non-trivial work:
 |--------|-------------------|
 | `Read all memory bank files.` | Explain Cric-Lab goals, stack, pipeline, risks — no code yet |
 | Implement upload → metrics | Modular pipeline; no LLM measuring frames |
-| Add a new bowling metric | Extend metrics stage + API payload; UI cards live in criclab-frontend |
+| Add a new bowling metric | Extend metrics stage + API payload; UI cards live in criclab-web-frontend |
 
 ## Updates
 

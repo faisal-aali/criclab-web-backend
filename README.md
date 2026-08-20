@@ -2,7 +2,7 @@
 
 FastAPI API for AI cricket bowling analysis: upload video → MediaPipe pose → metrics → slow-mo overlay → Gemma coaching → PDF report.
 
-Sibling frontend: `../criclab-frontend` (Vite + React).
+Sibling frontend: `../criclab-web-frontend` (Vite + React).
 
 ## Stack
 
@@ -25,7 +25,7 @@ Sibling frontend: `../criclab-frontend` (Vite + React).
 ## Quick start
 
 ```bash
-cd criclab-backend
+cd criclab-web-backend
 python3.12 -m venv .venv312
 # Windows PowerShell:
 .\.venv312\Scripts\Activate.ps1

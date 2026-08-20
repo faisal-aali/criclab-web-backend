@@ -27,13 +27,13 @@ numbers.
   highlighted), release marker, phase banner, "SLOW MOTION" tag, live metrics
   panel. avc1/H.264 encode.
 - **Cloudinary** (`services/cloudinary_service.py`): uploads processed video +
-  PDF, returns shareable URLs; local-disk fallback. Creds in `backend/.env`.
+  PDF, returns shareable URLs; local-disk fallback. Creds in `.env`.
 - **6-page SpinLab-style PDF** (`pdf/report.py` + `pdf/charts.py`): metric tiles
   with reference bands, kinematic sequence, score rings, angle/hand-speed charts,
   per-phase angle table, AI coach notes + release still.
 - **Frontend**: results page shows Cloudinary video + copyable URL, new metric
   cards + score rings; processing stages updated; pinched hero/logo type fixed.
-- **Runtime**: backend now runs on **`backend/.venv312`** (Python 3.12) because
+- **Runtime**: backend now runs on **`.venv312`** (Python 3.12) because
   MediaPipe needs numpy<2 and Python ≤3.12.
 
 ## Acceptance criteria

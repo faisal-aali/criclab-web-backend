@@ -6,7 +6,7 @@ visibility score. Everything downstream (release detection, joint angles, arm
 speed, the overlay skeleton) is derived from this track — the LLM never sees raw
 frames.
 
-Requires the Python 3.12 environment (`backend/.venv312`) because MediaPipe does
+Requires the Python 3.12 environment (`.venv312`) because MediaPipe does
 not support Python 3.13/3.14.
 """
 
@@ -76,7 +76,7 @@ def extract_pose_track(
     if not MEDIAPIPE_AVAILABLE:
         raise RuntimeError(
             "mediapipe is not installed in this interpreter. Run the backend with "
-            "the Python 3.12 environment (backend/.venv312)."
+            "the Python 3.12 environment (.venv312)."
         )
 
     cap = cv2.VideoCapture(str(video_path))

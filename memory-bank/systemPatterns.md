@@ -20,7 +20,7 @@ Upload → Extract meta → POSE (MediaPipe) → Action/release detection → Ca
 | Mode | Route | Camera | Truth |
 |------|--------|--------|--------|
 | **Action** | `/` | Side-on full-body | Mechanics: sequence, brace, stride, elbow, leave-hand arm speed. Ball km/h is an **image-plane + height-scale estimate**, or `—`. |
-| **Ball flight** | `/ball-flight` | ~4 m behind non-striker, **both stump sets** | Pitch-plane speed / line / length via stump homography (`backend/app/balltrack/`). Validate ~45–155 km/h. Not a radar gun. |
+| **Ball flight** | `/ball-flight` | ~4 m behind non-striker, **both stump sets** | Pitch-plane speed / line / length via stump homography (`app/balltrack/`). Validate ~45–155 km/h. Not a radar gun. |
 
 Wrong camera on Action still shows **—** for km/h. Never paste stump speed onto a pose job as a fake headline.
 
@@ -49,9 +49,9 @@ torso, fence, or a stationary tree is not a ball track: return null + reason.
 - **2D hip/trunk rotation** is advanced proxy only — not headline truth. Reject values outside a cricket-plausible deg/s band (do not clamp spikes).
 - **Profile `bowling_arm`** wins over auto side detection.
 
-## Frontend API contract (sibling repo: criclab-frontend)
+## Frontend API contract (sibling repo: criclab-web-frontend)
 
-UI lives in `../criclab-frontend`. Backend must keep this contract stable:
+UI lives in `../criclab-web-frontend`. Backend must keep this contract stable:
 
 - Job polling via `/jobs/{id}` and `/balltrack/jobs/{id}` with `status`, `progress`, `stage`, `message`
 - Metrics JSON: physical values only when `status === 'ok'` (null + reason otherwise); UI gates cards on that
@@ -171,7 +171,7 @@ Processed overlay video (`{job_id}_overlay`, folder `criclab/videos`) and PDF
 (`{job_id}_report`, folder `criclab/reports`) are uploaded; the delivery stores
 `artifacts.cloudinary_video_url` (playback, h264) and `cloudinary_pdf_url`. Upload
 failures never fail the job — the app falls back to serving `/artifacts/...` from
-local disk. Creds live in `backend/.env` (`CLOUDINARY_URL` or the three explicit
+local disk. Creds live in `.env` (`CLOUDINARY_URL` or the three explicit
 fields).
 
 ## Anti-patterns (do not introduce)
@@ -183,7 +183,7 @@ fields).
 - Reporting raw high-fps angular velocities without smooth + **reject** (do not clamp spikes)
 - Running the backend on the 3.14 venv (mediapipe won't import)
 - Building batting/fielding features before bowling MVP is solid
-- Fat React components that reimplement backend metrics (UI is in criclab-frontend)
+- Fat React components that reimplement backend metrics (UI is in criclab-web-frontend)
 - Monolithic “analyze_everything.py” with no stage boundaries
 - Reintroducing Notera (notes/PWA) or Next.js-as-frontend assumptions into this product
 - Merging frontend source back into this repo (keep the split)

@@ -2,7 +2,7 @@
 
 Structured source of truth the AI reads first for the **Cric-Lab FastAPI backend** (CV pipeline, agent, PDF, MongoDB).
 
-Sibling frontend repo: `../criclab-frontend` (Vite + React UI + its own trimmed memory-bank).
+Sibling frontend repo: `../criclab-web-frontend` (Vite + React UI + its own trimmed memory-bank).
 
 ## Layout
 

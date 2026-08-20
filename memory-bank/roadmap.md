@@ -30,10 +30,10 @@ High-level features. Detail lives in `tasks/`.
 - **SpinLab-parity rebuild:** switched the measurement engine from ball tracking
   to MediaPipe **pose**; added slow-motion overlay video, **Cloudinary** upload
   (video + PDF URLs), a 6-page SpinLab-style PDF, and robust/honest biomechanics
-  metrics. Backend now runs on the **Python 3.12** venv (`backend/.venv312`).
+  metrics. Backend now runs on the **Python 3.12** venv (`.venv312`).
 - Fixed pinched hero/logo typography (relaxed letter-spacing + line-height).
 - **18 Aug 2026:** Two film modes (Action vs Ball flight). Gemma coaches and
-  picks drills from `backend/app/coaching/drills.json` only. Action arm speed is
+  picks drills from `app/coaching/drills.json` only. Action arm speed is
   leave-hand, not cocking peak. Missing ball speed no longer scores from arm
   speed. FEAT-016 (radar validation) remains Planned — stump speed is pitch-plane,
   not a gun.

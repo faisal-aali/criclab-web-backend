@@ -1,6 +1,6 @@
 # Tech Context — Cric-Lab (Backend)
 
-Sibling frontend: `../criclab-frontend` (Vite + React). This repo is the FastAPI API + CV pipeline only.
+Sibling frontend: `../criclab-web-frontend` (Vite + React). This repo is the FastAPI API + CV pipeline only.
 
 ## Stack
 
@@ -24,7 +24,7 @@ MediaPipe requires **Python 3.10–3.12** and pins `numpy<2`. Run the backend wi
 the dedicated 3.12 virtualenv, NOT a 3.13/3.14 one:
 
 ```bash
-cd criclab-backend
+cd criclab-web-backend
 source .venv312/bin/activate      # Windows: .\.venv312\Scripts\Activate.ps1
 uvicorn app.main:app --reload --port 8000
 ```
@@ -46,7 +46,7 @@ Python is the practical choice for OpenCV, pose estimation, tracking, and physic
 ## High-level data flow
 
 ```text
-Vite React (upload)  [criclab-frontend]
+Vite React (upload)  [criclab-web-frontend]
   → FastAPI /videos + /analyses
     → FFmpeg / OpenCV pipeline
       → Detection + tracking + pose
@@ -60,7 +60,7 @@ Vite React (upload)  [criclab-frontend]
 ## Repo layout (this backend)
 
 ```text
-criclab-backend/
+criclab-web-backend/
 ├── app/
 │   ├── api/              # routes (videos, balltrack, coaching, health)
 │   ├── pipeline/         # extract · pose · action · calibrate · metrics · render
@@ -79,7 +79,7 @@ criclab-backend/
 └── run.sh
 ```
 
-Frontend lives in the sibling repo `criclab-frontend/`.
+Frontend lives in the sibling repo `criclab-web-frontend/`.
 
 ## MongoDB collections (target)
 
@@ -119,7 +119,7 @@ Pixel motion ≠ real-world speed. Always show confidence and label speeds as **
 ## Local setup
 
 ```bash
-cd criclab-backend
+cd criclab-web-backend
 python3.12 -m venv .venv312 && source .venv312/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
@@ -133,4 +133,4 @@ ollama list   # expect gemma3:4b, nomic-embed-text
 - Do not put frame measurement logic in Gemma
 - Prefer modular pipeline packages over one giant script
 - MongoDB is the system of record for analyses and history
-- Frontend is a separate repo (`criclab-frontend`); do not reintroduce a monorepo layout here
+- Frontend is a separate repo (`criclab-web-frontend`); do not reintroduce a monorepo layout here
