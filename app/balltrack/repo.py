@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
+
+from app.db.mongo import get_db
+
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid4().hex[:12]}"
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _col_sessions():
+    return get_db()["balltrack_sessions"]
+
+
+def _col_deliveries():
+    return get_db()["balltrack_deliveries"]
+
+
+def _col_jobs():
+    return get_db()["balltrack_jobs"]
+
+
+async def insert_session(doc: dict[str, Any]) -> str:
+    await _col_sessions().insert_one(doc)
+    return doc["_id"]
+
+
+async def get_session(session_id: str) -> dict[str, Any] | None:
+    return await _col_sessions().find_one({"_id": session_id})
+
+
+async def update_session(session_id: str, **fields: Any) -> None:
+    fields["updated_at"] = utcnow()
+    await _col_sessions().update_one({"_id": session_id}, {"$set": fields})
+
+
+async def list_sessions(limit: int = 50) -> list[dict[str, Any]]:
+    cursor = _col_sessions().find().sort("created_at", -1).limit(limit)
+    return await cursor.to_list(length=limit)
+
+
+async def insert_delivery(doc: dict[str, Any]) -> str:
+    await _col_deliveries().insert_one(doc)
+    return doc["_id"]
+
+
+async def get_delivery(delivery_id: str) -> dict[str, Any] | None:
+    return await _col_deliveries().find_one({"_id": delivery_id})
+
+
+async def list_deliveries_for_session(session_id: str) -> list[dict[str, Any]]:
+    cursor = _col_deliveries().find({"session_id": session_id}).sort("index", 1)
+    return await cursor.to_list(length=200)
+
+
+async def insert_job(doc: dict[str, Any]) -> str:
+    await _col_jobs().insert_one(doc)
+    return doc["_id"]
+
+
+async def update_job(job_id: str, **fields: Any) -> None:
+    fields["updated_at"] = utcnow()
+    await _col_jobs().update_one({"_id": job_id}, {"$set": fields})
+
+
+async def get_job(job_id: str) -> dict[str, Any] | None:
+    return await _col_jobs().find_one({"_id": job_id})

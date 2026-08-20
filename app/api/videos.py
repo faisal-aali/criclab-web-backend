@@ -1,0 +1,189 @@
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+
+from app.config import get_settings
+from app.db import repository as repo
+from app.pipeline.profile import parse_player_profile
+from app.pipeline.runner import run_analysis_job
+
+router = APIRouter(tags=["analysis"])
+
+
+@router.post("/videos")
+async def upload_video(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    player_name: str = Form("Bowler"),
+    first_name: str | None = Form(None),
+    last_name: str | None = Form(None),
+    date_of_birth: str | None = Form(None),
+    height_ft: float | None = Form(None),
+    height_in: float | None = Form(None),
+    weight_lbs: float | None = Form(None),
+    bowling_arm: str | None = Form(None),
+    bowling_style: str | None = Form(None),
+    meters_per_pixel: float | None = Form(None),
+    reference_height_m: float | None = Form(None),
+):
+    if not file.filename:
+        raise HTTPException(400, "Missing filename")
+    suffix = Path(file.filename).suffix.lower() or ".mp4"
+    if suffix not in {".mp4", ".mov", ".avi", ".mkv", ".webm"}:
+        raise HTTPException(400, "Unsupported video type")
+
+    profile = parse_player_profile(
+        player_name=player_name,
+        first_name=first_name,
+        last_name=last_name,
+        date_of_birth=date_of_birth,
+        height_ft=height_ft,
+        height_in=height_in,
+        reference_height_m=reference_height_m,
+        weight_lbs=weight_lbs,
+        bowling_arm=bowling_arm,
+        bowling_style=bowling_style,
+        meters_per_pixel=meters_per_pixel,
+    )
+
+    settings = get_settings()
+    videos_dir = settings.storage_path / "videos"
+    videos_dir.mkdir(parents=True, exist_ok=True)
+
+    video_id = repo.new_id("vid")
+    job_id = repo.new_id("job")
+    dest = videos_dir / f"{video_id}{suffix}"
+
+    with dest.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+
+    video_doc = {
+        "_id": video_id,
+        "original_name": file.filename,
+        "path": str(dest),
+        "content_type": file.content_type,
+        "player_name": profile["player_name"],
+        "player_profile": profile,
+        "created_at": repo.utcnow(),
+    }
+    await repo.insert_video(video_doc)
+
+    job_doc = {
+        "_id": job_id,
+        "video_id": video_id,
+        "status": "queued",
+        "progress": 0,
+        "stage": "queued",
+        "message": "Queued for analysis",
+        "player_name": profile["player_name"],
+        "created_at": repo.utcnow(),
+        "updated_at": repo.utcnow(),
+    }
+    await repo.insert_job(job_doc)
+
+    background_tasks.add_task(
+        run_analysis_job,
+        job_id=job_id,
+        video_id=video_id,
+        video_path=dest,
+        player_name=profile["player_name"],
+        meters_per_pixel=profile.get("meters_per_pixel"),
+        reference_height_m=profile["height_m"],
+        player_profile=profile,
+    )
+
+    return {"video_id": video_id, "job_id": job_id, "status": "queued"}
+
+
+@router.get("/jobs/{job_id}")
+async def get_job(job_id: str):
+    job = await repo.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    job["id"] = job.pop("_id")
+    return job
+
+
+@router.get("/deliveries")
+async def list_deliveries(limit: int = 50):
+    items = await repo.list_deliveries(limit=limit)
+    out = []
+    for d in items:
+        out.append(
+            {
+                "id": d["_id"],
+                "job_id": d.get("job_id"),
+                "video_id": d.get("video_id"),
+                "player_name": d.get("player_name"),
+                "created_at": d.get("created_at"),
+                "metrics": d.get("metrics"),
+                "analysis_summary": (d.get("analysis") or {}).get("summary"),
+                "cloudinary": d.get("cloudinary"),
+                "artifacts": {
+                    "pdf_url": f"/artifacts/{d.get('job_id')}/bowling_report.pdf" if d.get("job_id") else None,
+                    "overlay_video_url": f"/artifacts/{d.get('job_id')}/overlay.mp4" if d.get("job_id") else None,
+                    "release_still_url": f"/artifacts/{d.get('job_id')}/release.jpg" if d.get("job_id") else None,
+                    "cloudinary_video_url": (d.get("artifacts") or {}).get("cloudinary_video_url"),
+                    "cloudinary_pdf_url": (d.get("artifacts") or {}).get("cloudinary_pdf_url"),
+                },
+            }
+        )
+    return {"items": out}
+
+
+@router.get("/deliveries/{delivery_id}")
+async def get_delivery(delivery_id: str):
+    d = await repo.get_delivery(delivery_id)
+    if not d:
+        raise HTTPException(404, "Delivery not found")
+    video = await repo.get_video(d["video_id"]) if d.get("video_id") else None
+    video_name = Path(video["path"]).name if video and video.get("path") else None
+    return {
+        "id": d["_id"],
+        "job_id": d.get("job_id"),
+        "video_id": d.get("video_id"),
+        "player_name": d.get("player_name"),
+        "player_profile": d.get("player_profile") or (d.get("metrics") or {}).get("player_profile"),
+        "created_at": d.get("created_at"),
+        "meta": d.get("meta"),
+        "metrics": d.get("metrics"),
+        "analysis": d.get("analysis"),
+        "action": d.get("action"),
+        "release": d.get("release"),
+        "cloudinary": d.get("cloudinary"),
+        "artifacts": {
+            "release_still_url": f"/artifacts/{d.get('job_id')}/release.jpg",
+            "overlay_video_url": f"/artifacts/{d.get('job_id')}/overlay.mp4",
+            "pdf_url": f"/artifacts/{d.get('job_id')}/bowling_report.pdf",
+            "original_video_url": f"/media/videos/{video_name}" if video_name else None,
+            "cloudinary_video_url": (d.get("artifacts") or {}).get("cloudinary_video_url"),
+            "cloudinary_pdf_url": (d.get("artifacts") or {}).get("cloudinary_pdf_url"),
+        },
+    }
+
+
+@router.get("/artifacts/{job_id}/{filename}")
+async def get_artifact(job_id: str, filename: str, download: bool = False):
+    if "/" in filename or ".." in filename:
+        raise HTTPException(400, "Invalid filename")
+    path = get_settings().storage_path / "artifacts" / job_id / filename
+    if not path.exists():
+        raise HTTPException(404, "Artifact not found")
+    if download:
+        # Force a save dialog (Content-Disposition: attachment) instead of inline view.
+        return FileResponse(path, filename=filename)
+    return FileResponse(path)
+
+
+@router.get("/media/videos/{filename}")
+async def get_video_media(filename: str):
+    if "/" in filename or ".." in filename:
+        raise HTTPException(400, "Invalid filename")
+    path = get_settings().storage_path / "videos" / filename
+    if not path.exists():
+        raise HTTPException(404, "Video not found")
+    return FileResponse(path)
