@@ -37,3 +37,10 @@ High-level features. Detail lives in `tasks/`.
   leave-hand, not cocking peak. Missing ball speed no longer scores from arm
   speed. FEAT-016 (radar validation) remains Planned — stump speed is pitch-plane,
   not a gun.
+- **21 Aug 2026 (TASK-006):** Action refinement pass against the measured SpinLab
+  reference. Hip/trunk peaks over the stride window (peak frames drive the
+  sequencing check + hip-rotation event), degenerate-projection guards on
+  line proxies and hip–shoulder separation, pose identity-flicker filter,
+  overlay playback normalised (real-time outside window, 2× inside, ~2.5 s
+  freezes, progress %), PDF gains zoned band tiles + kinematics sequencing
+  chart + event lines on all charts. New `hip_to_trunk_peak_gap_ms`.

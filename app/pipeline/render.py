@@ -223,12 +223,45 @@ def render_overlay_video(
     saved_phase_stills: set[str] = set()
     if stills_dir is not None:
         stills_dir.mkdir(parents=True, exist_ok=True)
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
+    # Playback normalisation. The source may be 30 fps or a 200+ fps slow-mo
+    # capture; the output is always 30 fps. Emit output frames so playback is
+    # ~real-time outside the delivery window and a gentle 2× slow-mo inside it
+    # (SpinLab cadence) — never "everything ×7 slower" on high-fps clips.
+    rate_out = out_fps / max(in_fps, 1e-6)
+
     idx = 0
     frames_written = 0
+    emit_acc = 0.0
     while True:
         ok, frame = cap.read()
         if not ok:
             break
+
+        in_window = (
+            w_start is not None and w_end is not None and w_start - 3 <= idx <= w_end + 3
+        )
+        freeze = pause_at.get(idx)
+        if freeze:
+            reps = freeze["reps"]
+            emit_acc = 0.0
+        else:
+            emit_acc += rate_out * (2.0 if in_window else 1.0)
+            reps = int(emit_acc)
+            emit_acc -= reps
+
+        need_still = (stills_dir is not None and idx in still_targets) or (
+            not saved_still
+            and release_still_path is not None
+            and release_frame is not None
+            and idx >= release_frame
+        )
+        if reps <= 0 and not need_still:
+            idx += 1
+            continue
+
         if scale != 1.0:
             frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
 
@@ -250,14 +283,10 @@ def render_overlay_video(
                 cv2.imwrite(str(stills_dir / f"{key}.jpg"), frame)
                 saved_phase_stills.add(key)
 
-        in_window = (
-            w_start is not None and w_end is not None and w_start - 3 <= idx <= w_end + 3
-        )
-        freeze = pause_at.get(idx)
         _draw_top_bar(frame, out_w, player_name, metrics, in_window)
         _draw_metric_tiles(frame, out_w, metrics)
         _draw_sequence(frame, out_w, idx, seq)
-        _draw_timeline(frame, out_w, out_h, idx, events, seq, w_start, w_end)
+        _draw_timeline(frame, out_w, out_h, idx, events, seq, total_frames)
         if freeze:
             _draw_pause_banner(frame, out_w, freeze["label"])
 
@@ -265,12 +294,6 @@ def render_overlay_video(
             cv2.imwrite(str(release_still_path), frame)
             saved_still = True
 
-        if freeze:
-            reps = freeze["reps"]
-        elif in_window:
-            reps = 2
-        else:
-            reps = 1
         for _ in range(reps):
             writer.write(frame)
             frames_written += 1
@@ -489,17 +512,21 @@ def _draw_top_bar(frame, w, player_name, metrics, in_window):
         _text(frame, "SLOW MOTION", (20, 63), 0.5, WHITE, 1)
 
 
-def _fmt_tile(m, kind: str) -> str:
+def _fmt_tile(m, kind: str) -> tuple[str, str]:
+    """(big value, small unit) — SpinLab tiles set the number much larger."""
     if not m:
-        return "—"
+        return "—", ""
     v = m["value"]
     if kind == "kmh":
-        return f"{v:.0f} KM/H"
+        return f"{v:.0f}", "KM/H"
     if kind == "m":
-        return f"{v:.2f} M"
+        return f"{v:.2f}", "M"
     if kind == "ms":
-        return f"{v:.0f} MS"
-    return f"{v:.0f}"
+        return f"{v:.0f}", "MS"
+    return f"{v:.0f}", ""
+
+
+TILE_W, TILE_H, TILE_GAP = 168, 64, 8
 
 
 def _draw_metric_tiles(frame, w, metrics):
@@ -509,24 +536,27 @@ def _draw_metric_tiles(frame, w, metrics):
         ("RELEASE HEIGHT", _fmt_tile(_metric_ok(metrics, "release_height_m"), "m")),
         ("RELEASE TIME", _fmt_tile(_metric_ok(metrics, "release_time_ms"), "ms")),
     ]
-    tw, th, gap = 168, 58, 8
+    tw, th, gap = TILE_W, TILE_H, TILE_GAP
     x0 = w - 12 - tw * 2 - gap
     y0 = 44
-    for i, (lab, val) in enumerate(tiles):
+    for i, (lab, (val, unit)) in enumerate(tiles):
         col, row = i % 2, i // 2
         x = x0 + col * (tw + gap)
         y = y0 + row * (th + gap)
         _panel(frame, x, y, tw, th, alpha=0.72)
-        _text(frame, lab, (x + 10, y + 18), 0.38, (180, 180, 180), 1)
-        _text(frame, val, (x + 10, y + 44), 0.62, WHITE, 2)
+        _text(frame, lab, (x + 10, y + 17), 0.38, (180, 180, 180), 1)
+        _text(frame, val, (x + 10, y + 50), 0.95, WHITE, 2)
+        if unit:
+            vw = cv2.getTextSize(val, cv2.FONT_HERSHEY_SIMPLEX, 0.95, 2)[0][0]
+            _text(frame, unit, (x + 16 + vw, y + 50), 0.42, (185, 185, 185), 1)
 
 
 def _draw_sequence(frame, w, idx, seq: list[dict[str, Any]]):
     if not seq:
         return
-    tw = 168 * 2 + 8
+    tw = TILE_W * 2 + TILE_GAP
     x0 = w - 12 - tw
-    y0 = 44 + 58 * 2 + 8 + 10
+    y0 = 44 + TILE_H * 2 + TILE_GAP + 10
     _panel(frame, x0, y0, tw, 18 + 22 * len(seq), alpha=0.68)
     _text(frame, "KINEMATIC SEQUENCE", (x0 + 10, y0 + 16), 0.4, (180, 180, 180), 1)
     for i, item in enumerate(seq):
@@ -544,45 +574,49 @@ def _draw_sequence(frame, w, idx, seq: list[dict[str, Any]]):
         _text(frame, label, (x0 + 34, y + 8), 0.4, WHITE if reached else (150, 150, 150), 1)
 
 
-def _draw_timeline(frame, w, h, idx, events, seq, w_start, w_end):
+def _draw_timeline(frame, w, h, idx, events, seq, total_frames):
     if not events:
         return
-    pad = 48
+    pad_l, pad_r = 96, 48
     bar_y = h - 28
     bar_h = 10
-    bar_x0, bar_x1 = pad, w - pad
+    bar_x0, bar_x1 = pad_l, w - pad_r
     bar_w = bar_x1 - bar_x0
-    frames = [fr for _, _, fr in events]
-    if w_start is not None:
-        frames.append(int(w_start))
-    if w_end is not None:
-        frames.append(int(w_end))
-    t0, t1 = min(frames), max(frames)
-    if t1 <= t0:
-        t1 = t0 + 1
+    # Full-video span (SpinLab): grey track everywhere, colour only between events.
+    t0 = 0
+    t1 = max(int(total_frames) - 1, max(fr for _, _, fr in events), 1)
 
     def x_at(fr: int) -> int:
         t = (fr - t0) / (t1 - t0)
         return int(bar_x0 + max(0.0, min(1.0, t)) * bar_w)
 
-    _panel(frame, bar_x0 - 8, bar_y - 36, bar_w + 16, 62, alpha=0.55)
+    _panel(frame, 8, bar_y - 36, bar_x1 - 8 + 16, 62, alpha=0.55)
 
-    # Colored segments between consecutive events.
+    # Progress figure at the left of the track, SpinLab-style.
+    pct = int(round(100.0 * min(1.0, max(0.0, idx / max(1, t1)))))
+    _text(frame, f"{pct} %", (16, bar_y + bar_h - 1), 0.72, WHITE, 2)
+
+    # Grey base track for the whole clip.
+    cv2.rectangle(frame, (bar_x0, bar_y), (bar_x1, bar_y + bar_h), (74, 74, 74), -1)
+
+    # Colored segments between consecutive events (delivery window only).
     for (k0, _tag0, fr0), (_k1, _tag1, fr1) in zip(events, events[1:]):
         x0, x1 = x_at(fr0), x_at(fr1)
         color = PHASE_COLOR.get(k0, BLUE)
         cv2.rectangle(frame, (x0, bar_y), (x1, bar_y + bar_h), color, -1)
-    # Tail after last event.
-    last_key, _, last_fr = events[-1]
-    cv2.rectangle(frame, (x_at(last_fr), bar_y), (bar_x1, bar_y + bar_h), PHASE_COLOR.get(last_key, PURPLE), -1)
 
+    # Tags above the bar — nudged right when close events would overlap.
+    last_right = -1e9
     for key, tag, fr in events:
         x = x_at(fr)
         active = abs(idx - fr) <= 4
         color = PHASE_COLOR.get(key, WHITE)
         tw = 8 * len(tag) + 16
-        _panel(frame, x - tw // 2, bar_y - 28, tw, 20, alpha=0.8, color=color if active else INK)
-        _text(frame, tag, (x - tw // 2 + 6, bar_y - 13), 0.4, WHITE, 1)
+        tx = max(int(x - tw // 2), int(last_right + 4))
+        tx = min(tx, bar_x1 - tw)
+        last_right = tx + tw
+        _panel(frame, tx, bar_y - 28, tw, 20, alpha=0.8, color=color if active else INK)
+        _text(frame, tag, (tx + 6, bar_y - 13), 0.4, WHITE, 1)
 
     # Sequence numbers under matching frames.
     key_to_n = {item.get("key"): item.get("n") for item in seq if item.get("frame") is not None}

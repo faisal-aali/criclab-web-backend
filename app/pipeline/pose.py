@@ -122,6 +122,8 @@ def extract_pose_track(
         pose.close()
         cap.release()
 
+    frames, dropped = _drop_identity_flickers(frames, width, height)
+
     return {
         "fps": fps,
         "width": width,
@@ -129,8 +131,57 @@ def extract_pose_track(
         "frame_count": total,
         "sampled_stride": stride,
         "detected_frames": len(frames),
+        "dropped_outlier_frames": dropped,
         "frames": frames,
     }
+
+
+def _frame_anchor(frame: dict[str, Any]) -> np.ndarray | None:
+    """Mid-hip (fallback mid-shoulder) — a stable per-person anchor point."""
+    lh = point(frame, "left_hip")
+    rh = point(frame, "right_hip")
+    if lh is not None and rh is not None:
+        return (lh + rh) / 2
+    ls = point(frame, "left_shoulder")
+    rs = point(frame, "right_shoulder")
+    if ls is not None and rs is not None:
+        return (ls + rs) / 2
+    return None
+
+
+def _drop_identity_flickers(
+    frames: list[dict[str, Any]],
+    width: int,
+    height: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Drop frames where the tracked person teleports (lock flicked to a bystander).
+
+    Smooth motion barely deviates from a short local median of the mid-hip
+    trajectory; a swap to another person in frame is an instant jump of
+    hundreds of pixels. Reject frames whose anchor sits far from the local
+    median — never smooth or move landmarks, only drop the frame.
+    """
+    if len(frames) < 9 or not width or not height:
+        return frames, 0
+    anchors: list[np.ndarray | None] = [_frame_anchor(f) for f in frames]
+    valid = [(i, a) for i, a in enumerate(anchors) if a is not None]
+    if len(valid) < 9:
+        return frames, 0
+    thresh = 0.08 * float(np.hypot(width, height))
+    drop: set[int] = set()
+    idxs = [i for i, _ in valid]
+    pts = np.array([a for _, a in valid], dtype=float)
+    half = 3
+    for j in range(len(valid)):
+        lo = max(0, j - half)
+        hi = min(len(valid), j + half + 1)
+        med = np.median(pts[lo:hi], axis=0)
+        if float(np.linalg.norm(pts[j] - med)) > thresh:
+            drop.add(idxs[j])
+    if not drop:
+        return frames, 0
+    kept = [f for i, f in enumerate(frames) if i not in drop]
+    return kept, len(drop)
 
 
 # --------------------------------------------------------------------------- #

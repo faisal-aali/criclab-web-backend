@@ -172,14 +172,18 @@ def track_ball_from_release(
         cands = detect.merge_ball_candidates(dark, color, motion, hough)
         min_hand = 48.0 if elapsed >= 4 else 12.0
         max_r = min(frame_w, frame_h) * 0.065
+        # Downrange side follows the throw direction — never assume rightward.
+        rightward = dx >= 0
+        edge_near, edge_far = (24.0, 48.0) if rightward else (48.0, 24.0)
         filtered = []
         for c in cands:
             if float(c.get("r") or 0) > max_r:
                 continue
-            if c["x"] < 24 or c["x"] > frame_w - 48:
+            if c["x"] < edge_near or c["x"] > frame_w - edge_far:
                 continue
-            # Large blobs clipped by the right edge are trees/posts, not the ball.
-            if c["x"] > frame_w * 0.88 and float(c.get("r") or 0) > 28:
+            # Large blobs clipped by the downrange edge are trees/posts, not the ball.
+            at_downrange_edge = c["x"] > frame_w * 0.88 if rightward else c["x"] < frame_w * 0.12
+            if at_downrange_edge and float(c.get("r") or 0) > 28:
                 continue
             dh = float(np.hypot(c["x"] - hand_x, c["y"] - hand_y))
             if dh < min_hand:

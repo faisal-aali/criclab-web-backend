@@ -46,7 +46,13 @@ torso, fence, or a stationary tree is not a ball track: return null + reason.
 - **Ball speed (Ball flight)** = stump-homography pitch-plane distance/time. Separate job.
 - **Truth contract**: measure or null+reason. Sanity gates reject — never clamp a
   bad number into a “nice” value. UI/PDF/overlay share the same metrics JSON (`status === ok`).
-- **2D hip/trunk rotation** is advanced proxy only — not headline truth. Reject values outside a cricket-plausible deg/s band (do not clamp spikes).
+- **2D hip/trunk rotation** is advanced proxy only — not headline truth. Peaks are
+  measured over the delivery-stride window (hip → trunk → arm peak *before*
+  release), and the same peak frames drive the sequencing check and the
+  hip-rotation event. Reject values outside a cricket-plausible deg/s band
+  (do not clamp spikes). Line angles from a foreshortened segment (shoulders
+  pointing at the camera) are projection noise — drop those frames; a
+  hip–shoulder separation beyond ±75° is projection collapse → unavailable.
 - **Profile `bowling_arm`** wins over auto side detection.
 
 ## Frontend API contract (sibling repo: criclab-web-frontend)
@@ -108,6 +114,10 @@ Layout matches SpinLab’s processed clip, cricket labels only:
 - **Event pause:** hold each of those frames for ~2.5 s (SpinLab-style freeze),
   with a CricLab event banner. Gentle 2× slow-mo between events in the delivery
   window. Output 30 fps. Encode `avc1` → `mp4v`; Cloudinary `q_auto,vc_h264`.
+- **Playback normalisation:** playback is ~real-time outside the delivery
+  window and 2× inside it *regardless of source fps* — a 200 fps slow-mo
+  capture must not render as a ×7 crawl. Bottom-left progress % over a
+  full-clip grey track; colour only inside the delivery window.
 
 Timeline map (do not copy QB/baseball names onto cricket footage):
 FP → **FFC**, BR → **REL**, FT → **FT**, MER → bowling-arm cocking,

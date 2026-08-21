@@ -74,7 +74,23 @@ def _tile_value(metrics: dict[str, Any], key: str):
     return m.get("value"), None
 
 
-def _tile(label: str, value, unit: str, lo: float, hi: float, reason: str | None = None) -> Drawing:
+BAND_RED = colors.HexColor("#DC2626")
+BAND_YELLOW = colors.HexColor("#EAB308")
+BAND_GREEN = colors.HexColor("#16A34A")
+
+# Metrics where the good zone sits in the middle of the band (SpinLab stride tile),
+# instead of "higher is better".
+CENTERED_BAND_KEYS = {"stride_length_pct_height", "release_angle_deg"}
+
+
+def _fmt_tile_value(value, unit: str) -> str:
+    if unit == "m":
+        return f"{value:.2f}"
+    return f"{value:.0f}"
+
+
+def _tile(label: str, value, unit: str, lo: float, hi: float,
+          reason: str | None = None, centered: bool = False) -> Drawing:
     w, h = 116, 86
     d = Drawing(w, h)
     d.add(Rect(0, 0, w, h, rx=8, ry=8, fillColor=MIST, strokeColor=LINE, strokeWidth=0.7))
@@ -82,22 +98,39 @@ def _tile(label: str, value, unit: str, lo: float, hi: float, reason: str | None
     if value is None:
         d.add(String(10, h - 40, "—", fontName="Helvetica-Bold", fontSize=22, fillColor=GREY))
         if reason:
-            d.add(String(10, h - 56, reason[:22], fontName="Helvetica", fontSize=5.5, fillColor=GREY))
-            if len(reason) > 22:
-                d.add(String(10, h - 66, reason[22:44], fontName="Helvetica", fontSize=5.5, fillColor=GREY))
+            lines: list[str] = [""]
+            for word in reason.split():
+                cand = (lines[-1] + " " + word).strip()
+                if len(cand) <= 24 or not lines[-1]:
+                    lines[-1] = cand
+                else:
+                    lines.append(word)
+                if len(lines) > 3:
+                    lines = lines[:3]
+                    lines[-1] += "…"
+                    break
+            for i, ln in enumerate(lines):
+                d.add(String(10, h - 56 - 9 * i, ln, fontName="Helvetica", fontSize=5.5, fillColor=GREY))
     else:
-        vtxt = f"{value:.2f}" if isinstance(value, float) and abs(value) < 100 else f"{value:.0f}"
+        vtxt = _fmt_tile_value(value, unit)
         d.add(String(10, h - 44, vtxt, fontName="Helvetica-Bold", fontSize=24, fillColor=PITCH))
         d.add(String(12 + 15 * len(vtxt), h - 44, unit, fontName="Helvetica", fontSize=8, fillColor=SEAM))
-        bx, by, bw = 10, 16, w - 20
-        d.add(Line(bx, by, bx + bw, by, strokeColor=LINE, strokeWidth=3))
+        # SpinLab-style zoned reference band with a pin at the measured value.
+        bx, by, bw, bh = 10, 14, w - 20, 5
+        if centered:
+            zones = [(0.0, 0.25, BAND_RED), (0.25, 0.75, BAND_GREEN), (0.75, 1.0, BAND_RED)]
+        else:
+            zones = [(0.0, 1 / 3, BAND_RED), (1 / 3, 2 / 3, BAND_YELLOW), (2 / 3, 1.0, BAND_GREEN)]
+        for z0, z1, zc in zones:
+            d.add(Rect(bx + z0 * bw, by, (z1 - z0) * bw, bh, fillColor=zc,
+                       strokeColor=None, strokeWidth=0))
         if hi > lo:
             t = max(0.0, min(1.0, (float(value) - lo) / (hi - lo)))
             mx = bx + t * bw
-            d.add(Line(bx, by, mx, by, strokeColor=SEAM, strokeWidth=3))
-            d.add(Circle(mx, by, 3.4, fillColor=PITCH, strokeColor=colors.white, strokeWidth=1))
-        d.add(String(bx, by - 11, f"{lo:g}", fontName="Helvetica", fontSize=6, fillColor=GREY))
-        d.add(String(bx + bw - 12, by - 11, f"{hi:g}", fontName="Helvetica", fontSize=6, fillColor=GREY))
+            d.add(Rect(mx - 1.6, by - 2, 3.2, bh + 4, rx=1.4, ry=1.4,
+                       fillColor=colors.white, strokeColor=PITCH, strokeWidth=0.9))
+        d.add(String(bx, by - 9, f"{lo:g}", fontName="Helvetica", fontSize=6, fillColor=GREY))
+        d.add(String(bx + bw - 12, by - 9, f"{hi:g}", fontName="Helvetica", fontSize=6, fillColor=GREY))
     return d
 
 
@@ -197,7 +230,8 @@ def _tile_row(metrics: dict[str, Any], items: list[tuple[str, str]]) -> Table:
     for label, key in items:
         lo, hi, unit = BANDS.get(key, (0, 100, ""))
         value, reason = _tile_value(metrics, key)
-        cells.append(_tile(label, value, unit, lo, hi, reason=reason))
+        cells.append(_tile(label, value, unit, lo, hi, reason=reason,
+                           centered=key in CENTERED_BAND_KEYS))
     while len(cells) < 4:
         cells.append("")
     t = Table([cells], colWidths=[122] * 4, hAlign="LEFT")
@@ -281,6 +315,13 @@ def build_pdf(
     # ---------------- Page 2: sequencing + scores + extra tiles ----------------
     story.append(PageBreak())
     story += _section_header(st, "CRICLAB BOWLING REPORT", "SEQUENCING AND KEY METRICS", player_name, date_str)
+
+    events_ms = metrics.get("event_t_ms") or {}
+    seq_png = charts.sequencing_chart(chart_dir, metrics.get("rotation_series") or [], events_ms)
+    if seq_png and Path(seq_png).exists():
+        story.append(Image(str(seq_png), width=178 * mm, height=66 * mm))
+        story.append(Spacer(1, 4))
+
     story.append(Paragraph("KINEMATICS SEQUENCE", st["h2"]))
 
     seq = metrics.get("kinematic_sequence") or []
@@ -293,9 +334,8 @@ def build_pdf(
         n = item.get("n") or ""
         lab = item.get("label") or item.get("key") or ""
         seen = item.get("frame") is not None
-        est = " (estimated)" if item.get("estimated") and seen else ""
         mark = "measured" if seen and not item.get("estimated") else ("estimated" if seen else "not seen")
-        seq_lines.append(f"<b>{n}. {lab}</b> — {mark}{est}")
+        seq_lines.append(f"<b>{n}. {lab}</b> — {mark}")
     story.append(Paragraph("<br/>".join(seq_lines) or "No sequence events detected.", st["seq"]))
     story.append(Spacer(1, 8))
 
@@ -332,8 +372,8 @@ def build_pdf(
     story.append(PageBreak())
     story += _section_header(st, "CRICLAB BOWLING REPORT", "JOINT ANGLES", player_name, date_str)
     angle_series = metrics.get("angle_series") or []
-    arm_png = charts.arm_angles_chart(chart_dir, angle_series)
-    leg_png = charts.leg_trunk_chart(chart_dir, angle_series)
+    arm_png = charts.arm_angles_chart(chart_dir, angle_series, events_ms)
+    leg_png = charts.leg_trunk_chart(chart_dir, angle_series, events_ms)
     story.append(Paragraph("BOWLING ARM", st["h2"]))
     if arm_png and Path(arm_png).exists():
         story.append(Image(str(arm_png), width=178 * mm, height=74 * mm))
@@ -350,8 +390,12 @@ def build_pdf(
     story.append(PageBreak())
     story += _section_header(st, "CRICLAB BOWLING REPORT", "JOINT VELOCITIES (ANGULAR)", player_name, date_str)
     story.append(Paragraph("BOWLING ARM", st["h2"]))
-    ws_png = charts.wrist_speed_chart(chart_dir, metrics.get("wrist_speed_series") or [], metrics.get("release_frame"))
-    arm_v = charts.arm_velocity_chart(chart_dir, angle_series)
+    base_frame = phases.get("front_foot_contact")
+    ws_png = charts.wrist_speed_chart(
+        chart_dir, metrics.get("wrist_speed_series") or [], metrics.get("release_frame"),
+        base_frame=base_frame, fps=fps, events_ms=events_ms,
+    )
+    arm_v = charts.arm_velocity_chart(chart_dir, angle_series, events_ms)
     if ws_png and Path(ws_png).exists():
         story.append(Image(str(ws_png), width=178 * mm, height=62 * mm))
         story.append(Spacer(1, 4))
@@ -360,7 +404,7 @@ def build_pdf(
     if not ((ws_png and Path(ws_png).exists()) or (arm_v and Path(arm_v).exists())):
         story.append(Paragraph("Arm velocity series unavailable.", st["body"]))
     story.append(Paragraph("TRUNK AND LEGS", st["h2"]))
-    leg_v = charts.leg_trunk_velocity_chart(chart_dir, angle_series)
+    leg_v = charts.leg_trunk_velocity_chart(chart_dir, angle_series, events_ms)
     if leg_v and Path(leg_v).exists():
         story.append(Image(str(leg_v), width=178 * mm, height=62 * mm))
     else:
@@ -462,6 +506,7 @@ def build_pdf(
         ["Arm-swing speed (deg/s)", _fmt(_ok_val(metrics, "arm_swing_speed_deg_s"), 0)],
         ["Peak hip-line proxy (deg/s)", _fmt(_ok_val(metrics, "hip_rotation_speed_deg_s"), 0)],
         ["Peak trunk-line proxy (deg/s)", _fmt(_ok_val(metrics, "trunk_rotation_speed_deg_s"), 0)],
+        ["Time between peak hip / trunk (ms)", _fmt(_ok_val(metrics, "hip_to_trunk_peak_gap_ms"), 0)],
         ["Time FFC → MER (ms)", _fmt(ffc_to_mer, 0)],
         ["Time MER → REL (ms)", _fmt(mer_to_rel, 0)],
         ["Time hip rotation → REL (ms)", _fmt(hip_to_rel, 0)],

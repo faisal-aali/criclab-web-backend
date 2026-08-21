@@ -17,6 +17,14 @@ BALL = "#B91C1C"
 GRID = "#CBD5E0"
 
 
+EVENT_LINES = [
+    # (metrics event_t_ms key, label, linestyle) — SpinLab draws these on every chart.
+    ("front_foot_contact", "FFC", "solid"),
+    ("max_external_rotation", "MER", "dashed"),
+    ("release", "REL", "dotted"),
+]
+
+
 def _series(angle_series: list[dict[str, Any]], key: str) -> tuple[list[float], list[float]]:
     xs, ys = [], []
     for a in angle_series:
@@ -26,7 +34,20 @@ def _series(angle_series: list[dict[str, Any]], key: str) -> tuple[list[float], 
     return xs, ys
 
 
-def _line_chart(out: Path, title: str, angle_series, specs: list[tuple[str, str, str]]) -> Path | None:
+def _draw_event_lines(ax, events_ms: dict[str, Any] | None) -> None:
+    if not events_ms:
+        return
+    for key, label, style in EVENT_LINES:
+        t = events_ms.get(key)
+        if t is None and key == "max_external_rotation":
+            t = events_ms.get("arm_horizontal")
+        if t is None:
+            continue
+        ax.axvline(float(t), color="#666666", linestyle=style, linewidth=1.2, label=label)
+
+
+def _line_chart(out: Path, title: str, angle_series, specs: list[tuple[str, str, str]],
+                events_ms: dict[str, Any] | None = None) -> Path | None:
     fig, ax = plt.subplots(figsize=(7.2, 3.0), dpi=150)
     plotted = False
     for key, label, color in specs:
@@ -37,11 +58,12 @@ def _line_chart(out: Path, title: str, angle_series, specs: list[tuple[str, str,
     if not plotted:
         plt.close(fig)
         return None
+    _draw_event_lines(ax, events_ms)
     ax.set_title(title, color=PITCH, fontsize=12, fontweight="bold", loc="left")
     ax.set_xlabel("Time from front-foot contact (ms)", fontsize=9)
     ax.set_ylabel("Angle (deg)", fontsize=9)
     ax.grid(True, color=GRID, linewidth=0.6, alpha=0.7)
-    ax.legend(loc="best", fontsize=8, frameon=False)
+    ax.legend(loc="best", fontsize=8, frameon=False, ncol=2)
     for s in ax.spines.values():
         s.set_color(GRID)
     fig.tight_layout()
@@ -50,39 +72,88 @@ def _line_chart(out: Path, title: str, angle_series, specs: list[tuple[str, str,
     return out
 
 
-def arm_angles_chart(out_dir: Path, angle_series) -> Path | None:
+def arm_angles_chart(out_dir: Path, angle_series, events_ms=None) -> Path | None:
     return _line_chart(
         out_dir / "chart_arm_angles.png",
         "Bowling arm — joint angles through the delivery",
         angle_series,
         [("elbow_extension", "Elbow extension", SEAM),
          ("shoulder_abduction", "Shoulder abduction", PITCH)],
+        events_ms,
     )
 
 
-def leg_trunk_chart(out_dir: Path, angle_series) -> Path | None:
+def leg_trunk_chart(out_dir: Path, angle_series, events_ms=None) -> Path | None:
     return _line_chart(
         out_dir / "chart_leg_trunk.png",
         "Trunk & legs — joint angles through the delivery",
         angle_series,
         [("trunk_flexion", "Trunk flexion", PITCH),
          ("front_knee_flexion", "Front-knee flexion", SEAM)],
+        events_ms,
     )
 
 
-def wrist_speed_chart(out_dir: Path, wrist_speed_series, release_frame: int | None) -> Path | None:
-    xs = [float(p["frame"]) for p in (wrist_speed_series or [])]
-    ys = [float(p["speed_px"]) for p in (wrist_speed_series or [])]
+def sequencing_chart(out_dir: Path, rotation_series, events_ms=None) -> Path | None:
+    """SpinLab page-2 signature chart: hip / trunk / arm angular speed + events."""
+    specs = [
+        ("hip_deg_s", "Hip line (2D proxy)", "#1D4ED8", "solid"),
+        ("trunk_deg_s", "Trunk line (2D proxy)", "#15803D", "dashed"),
+        ("arm_deg_s", "Bowling arm", SEAM, "dotted"),
+    ]
+    fig, ax = plt.subplots(figsize=(7.2, 2.7), dpi=150)
+    plotted = False
+    for key, label, color, style in specs:
+        xs, ys = _series(rotation_series or [], key)
+        if len(xs) >= 3:
+            ax.plot(xs, ys, label=label, color=color, linestyle=style, linewidth=2.0)
+            plotted = True
+    if not plotted:
+        plt.close(fig)
+        return None
+    _draw_event_lines(ax, events_ms)
+    ax.axhline(0, color=GRID, linewidth=0.8)
+    ax.set_title("Kinematics sequencing — angular speed (image plane)",
+                 color=PITCH, fontsize=12, fontweight="bold", loc="left")
+    ax.set_xlabel("Time from front-foot contact (ms)", fontsize=9)
+    ax.set_ylabel("deg/s", fontsize=9)
+    ax.grid(True, color=GRID, linewidth=0.6, alpha=0.7)
+    ax.legend(loc="best", fontsize=7.5, frameon=False, ncol=2)
+    for s in ax.spines.values():
+        s.set_color(GRID)
+    fig.tight_layout()
+    out = out_dir / "chart_sequencing.png"
+    fig.savefig(out, transparent=False)
+    plt.close(fig)
+    return out
+
+
+def wrist_speed_chart(out_dir: Path, wrist_speed_series, release_frame: int | None,
+                      base_frame: int | None = None, fps: float | None = None,
+                      events_ms: dict[str, Any] | None = None) -> Path | None:
+    pts = wrist_speed_series or []
+    if base_frame is not None and fps:
+        xs = [(float(p["frame"]) - float(base_frame)) / float(fps) * 1000.0 for p in pts]
+        x_label = "Time from front-foot contact (ms)"
+        rel_x = None if release_frame is None else (float(release_frame) - float(base_frame)) / float(fps) * 1000.0
+    else:
+        xs = [float(p["frame"]) for p in pts]
+        x_label = "Frame"
+        rel_x = release_frame
+    ys = [float(p["speed_px"]) for p in pts]
     if len(xs) < 2:
         return None
     fig, ax = plt.subplots(figsize=(7.2, 3.0), dpi=150)
     ax.plot(xs, ys, color=BALL, linewidth=2.2, label="Bowling-hand speed (px/frame)")
     ax.fill_between(xs, ys, color=BALL, alpha=0.12)
-    if release_frame is not None:
-        ax.axvline(release_frame, color=PITCH, linestyle="--", linewidth=1.6)
-        ax.text(release_frame, max(ys) * 0.96, " release", color=PITCH, fontsize=9, va="top")
+    if events_ms and base_frame is not None:
+        _draw_event_lines(ax, events_ms)
+        ax.legend(loc="best", fontsize=8, frameon=False, ncol=2)
+    elif rel_x is not None:
+        ax.axvline(rel_x, color=PITCH, linestyle="--", linewidth=1.6)
+        ax.text(rel_x, max(ys) * 0.96, " release", color=PITCH, fontsize=9, va="top")
     ax.set_title("Bowling-hand speed profile", color=PITCH, fontsize=12, fontweight="bold", loc="left")
-    ax.set_xlabel("Frame", fontsize=9)
+    ax.set_xlabel(x_label, fontsize=9)
     ax.set_ylabel("Speed (px/frame)", fontsize=9)
     ax.grid(True, color=GRID, linewidth=0.6, alpha=0.7)
     for s in ax.spines.values():
@@ -114,7 +185,8 @@ def _velocity_series(angle_series: list[dict[str, Any]], key: str) -> tuple[list
     return vxs, sm
 
 
-def _velocity_chart(out: Path, title: str, angle_series, specs: list[tuple[str, str, str]]) -> Path | None:
+def _velocity_chart(out: Path, title: str, angle_series, specs: list[tuple[str, str, str]],
+                    events_ms: dict[str, Any] | None = None) -> Path | None:
     fig, ax = plt.subplots(figsize=(7.2, 3.0), dpi=150)
     plotted = False
     for key, label, color in specs:
@@ -125,12 +197,13 @@ def _velocity_chart(out: Path, title: str, angle_series, specs: list[tuple[str, 
     if not plotted:
         plt.close(fig)
         return None
+    _draw_event_lines(ax, events_ms)
     ax.axhline(0, color=GRID, linewidth=0.8)
     ax.set_title(title, color=PITCH, fontsize=12, fontweight="bold", loc="left")
     ax.set_xlabel("Time from front-foot contact (ms)", fontsize=9)
     ax.set_ylabel("Angular velocity (deg/s)", fontsize=9)
     ax.grid(True, color=GRID, linewidth=0.6, alpha=0.7)
-    ax.legend(loc="best", fontsize=8, frameon=False)
+    ax.legend(loc="best", fontsize=8, frameon=False, ncol=2)
     for s in ax.spines.values():
         s.set_color(GRID)
     fig.tight_layout()
@@ -139,23 +212,25 @@ def _velocity_chart(out: Path, title: str, angle_series, specs: list[tuple[str, 
     return out
 
 
-def arm_velocity_chart(out_dir: Path, angle_series) -> Path | None:
+def arm_velocity_chart(out_dir: Path, angle_series, events_ms=None) -> Path | None:
     return _velocity_chart(
         out_dir / "chart_arm_velocity.png",
         "Bowling arm — angular velocity (image plane)",
         angle_series,
         [("elbow_extension", "Elbow extension", SEAM),
          ("shoulder_abduction", "Shoulder abduction", PITCH)],
+        events_ms,
     )
 
 
-def leg_trunk_velocity_chart(out_dir: Path, angle_series) -> Path | None:
+def leg_trunk_velocity_chart(out_dir: Path, angle_series, events_ms=None) -> Path | None:
     return _velocity_chart(
         out_dir / "chart_leg_trunk_velocity.png",
         "Trunk & legs — angular velocity (image plane)",
         angle_series,
         [("trunk_flexion", "Trunk flexion", PITCH),
          ("front_knee_flexion", "Front-knee flexion", SEAM)],
+        events_ms,
     )
 
 
