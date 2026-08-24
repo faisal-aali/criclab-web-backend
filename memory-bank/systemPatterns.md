@@ -53,6 +53,47 @@ torso, fence, or a stationary tree is not a ball track: return null + reason.
   (do not clamp spikes). Line angles from a foreshortened segment (shoulders
   pointing at the camera) are projection noise — drop those frames; a
   hip–shoulder separation beyond ±75° is projection collapse → unavailable.
+- **The timebase is a measurement, not metadata.** A slow-motion export carries
+  its *playback* rate in the container (30 fps) while each frame holds 1/120 s of
+  real time. Every km/h and every millisecond then reads several times too slow,
+  and every phase window ("front foot plants 60-600 ms before release") is cut
+  that many times too narrow in frames. `pipeline/timebase.py` solves the ball's
+  fall (`a_px = g / (mpp · fps²)`) for the real rate, and the action pass is redone
+  on it. Candidates are whole multiples of the container rate. Two curvature
+  readings are reconciled by their known bias directions: whole-arc curvature is
+  biased low (fps biased high) because the ball recedes; the cubic's quadratic
+  term at release is unbiased but noisier — the first bounds, the second centres.
+  Never override without a tracked flight; say the rate came from the file instead.
+- **A receding ball's image-x is not linear.** Pixels-per-frame decay through the
+  flight as the delivery goes downrange. Fit x(t) as a quadratic wherever the path
+  is modelled; a linear fit mis-predicts the frames nearest release by tens of
+  pixels, which both under-reads release speed and makes outlier filters discard
+  the early flight. Read release speed as the derivative at the *first* in-air
+  sample, not a median over the arc.
+- **Release comes from the ball when there is one.** `ball_leave_frame()` gives the
+  last frame the wrist is still on the ball; `analyze_action(release_override=...)`
+  then searches every other event relative to that measured release. Wrist-speed
+  refinement is the fallback, not the primary.
+- **Foot contact = the start of the ankle's final plateau**, not the hardest
+  downward strike in the window. At high frame rates the window spans run-up
+  strides that strike harder than the delivery stride.
+- **Ball speed must exceed arm speed.** The ball leaves from beyond the wrist on
+  the same rotating arm. If it comes out lower, the ball is foreshortened — report
+  it as a lower bound with the reason (`speed_consistency`), never silently.
+  Reported ball speed is the component *across the image*; a single camera cannot
+  see motion along its own axis.
+- **A validated in-air flight outranks the pose-based view guess** for speed. The
+  shoulder-width classifier reads a mixed/open action as front-on and would refuse
+  every speed on a clip whose ball plainly crosses the frame. Pose-only clips still
+  defer to the classifier.
+- **Release height is not gated on a side-on view** — it is a vertical distance and
+  camera yaw does not foreshorten vertical pixels. Stride length still is.
+- **Throwing (ICC 15°) screening is refused unless the view earns it.** From one
+  camera an arm angled at the lens projects a straight elbow as bent by more than
+  the 15° the whole test turns on. Report elbow angle at release always; report an
+  extension and a verdict only on a genuinely side-on swing that passes through
+  upper-arm-horizontal, and word it as screening — never as a call. A false
+  "illegal action" is a far worse failure than an honest `—`.
 - **Profile `bowling_arm`** wins over auto side detection.
 
 ## Frontend API contract (sibling repo: criclab-web-frontend)

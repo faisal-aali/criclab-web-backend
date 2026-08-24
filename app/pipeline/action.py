@@ -108,10 +108,10 @@ def _refine_release_frame(
     """
     peak = speed[peak_pos]
     pre = max(1, int(round(fps * 0.04)))
-    # MER→leave is ~50–120 ms of real time, but a 30 fps container of slow-mo
-    # (or a peak that landed on cocking) needs a longer *frame* window or REL
-    # freezes while the ball is still in the hand.
-    post = max(8, int(round(fps * 0.32)))
+    # Leave is ~50–120 ms after the highest wrist. Cap in *frames* so a native
+    # 120 fps clip cannot walk 0.32 s into follow-through (wrist on the hip,
+    # ball long gone). A 30 fps slow-mo export still gets at least 8 frames.
+    post = max(8, min(20, int(round(fps * 0.16))))
     lo, hi = peak_pos, peak_pos
     while lo > 0 and idxs[peak_pos] - idxs[lo] <= pre:
         lo -= 1
@@ -143,6 +143,7 @@ def _refine_release_frame(
     best_i = mer_i
     best_score = -1e18
     min_travel = 18.0
+    max_drop = 45.0
     for i in range(mer_i, hi + 1):
         if speed[i] < 0.50 * peak and i > mer_i + 1:
             if speed[i] < 0.35 * peak:
@@ -150,6 +151,10 @@ def _refine_release_frame(
         wr = _wrist_at(frames, side, idxs[i])
         if wr is None:
             continue
+        # Past leave-hand the bowling wrist falls toward the hip. Keep searching
+        # along the throw, but stop once the hand has clearly dropped off MER.
+        if float(wr[1]) > mer_y + max_drop:
+            break
         travel = float(np.hypot(float(wr[0]) - float(wr_mer[0]), float(wr[1]) - float(wr_mer[1])))
         if travel < min_travel:
             continue  # still at cocking — the ball has not left

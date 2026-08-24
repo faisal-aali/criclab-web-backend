@@ -20,7 +20,9 @@ High-level features. Detail lives in `tasks/`.
 | FEAT-014 | Ball tracking (Action) | Done | In-air flight lock; headline ball speed when the path leaves the hand |
 | FEAT-014b | **Ball flight (stumps)** | Done | Behind-bowler + both wickets; pitch-plane speed/line/length UI |
 | FEAT-015 | Coaching memory | Planned | Embeddings via `nomic-embed-text` + semantic search |
-| FEAT-016 | Validation | Planned | Radar / ground-truth checks; multi-view for true rotation speed |
+| FEAT-016 | Validation | Planned | Radar / ground-truth checks; multi-view for true rotation speed + the depth component of ball speed |
+| FEAT-018 | **Capture-rate recovery** | Done | Slow-motion clips timed from the ball's fall, not the container fps |
+| FEAT-019 | **Delivery type & throwing screen** | Done | Pace band from measured speed; ICC 15° screening only where the view supports it |
 | FEAT-017 | Train / drills | Done | Closed YouTube catalog + DrillShelf + `/train` library |
 
 ## Change log
@@ -44,3 +46,15 @@ High-level features. Detail lives in `tasks/`.
   overlay playback normalised (real-time outside window, 2× inside, ~2.5 s
   freezes, progress %), PDF gains zoned band tiles + kinematics sequencing
   chart + event lines on all charts. New `hip_to_trunk_peak_gap_ms`.
+- **24 Aug 2026 (TASK-007):** Slow-motion clips are now timed correctly. A 30 fps
+  container holding a 120 fps capture made every speed read 4x slow and cut every
+  phase window 4x too narrow; `pipeline/timebase.py` recovers the real rate from
+  the ball's own fall under gravity and the action pass is redone on it. Release
+  is taken from the frame the ball leaves the hand and now drives FFC/BFC/MER
+  detection; foot contact is found as the start of the ankle's final plateau
+  rather than the hardest strike in the window. Ball tracking gained a second
+  (RANSAC) path generator, per-candidate optical-flow validation, residual-based
+  outlier rejection, and a quadratic image-x model — a receding ball's pixel
+  speed decays, and assuming it constant was discarding the frames nearest
+  release. Ball speed is now read at release and always exceeds arm speed. New
+  `delivery_type`, `action_legality` (conservatively gated), `speed_consistency`.

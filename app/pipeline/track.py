@@ -215,7 +215,11 @@ def track_ball_from_release(
             dh = float(np.hypot(c["x"] - hand_x, c["y"] - hand_y))
             if dh < min_hand:
                 continue
-            if c["y"] > frame_h * 0.78:
+            # Turf is the bottom strip — not "72% of the frame". A 1080p clip
+            # with the bowler in the lower half releases around y=0.7; a 0.72
+            # cut deletes the white ball the moment it leaves the hand.
+            turf_y = min(frame_h * 0.92, max(hand_y + 100.0, frame_h * 0.82))
+            if c["y"] > turf_y:
                 continue
             down = (c["x"] - hand_x) * dx + (c["y"] - hand_y) * dy
             if elapsed >= 4 and down < 8:
@@ -245,7 +249,11 @@ def track_ball_from_release(
     # is something else in the scene that happens to move consistently — on a
     # 200 fps clip, RANSAC will happily find a long, clean, entirely wrong one
     # in the background once the real flight has left the frame.
-    max_start = int(release_frame) + max(4, int(round(fps * 0.15)))
+    # Gate in frames (capped) *and* by distance to the hand: 0.15 s at 120 fps
+    # is 18 frames, which drops a real lock a few frames late, while a poster
+    # blob can start "soon" after REL hundreds of pixels from the wrist.
+    max_start = int(release_frame) + max(16, min(40, int(round(fps * 0.28))))
+    max_hand_dist = max(220.0, 0.16 * float(frame_w))
 
     best: list[dict[str, Any]] = []
     best_key: tuple[int, int] | None = None
@@ -260,6 +268,9 @@ def track_ball_from_release(
         # the ball is the candidate on the curve, whatever else happened to be
         # closer to the previous point.
         cand = _reassociate(per_frame, cand, frame_w, frame_h)
+        # Clean again *after* re-association: re-picking can admit a second blob
+        # travelling alongside the ball, and the residual test is what removes it.
+        cand = _ballistic_clean(cand, frame_w, frame_h)
         cand = _longest_continuous(cand)
         if len(cand) < 6:
             continue
@@ -269,9 +280,16 @@ def track_ball_from_release(
         cand = _extend_backward(per_frame, cand, hand_x, hand_y, frame_w, frame_h)
         if int(cand[0]["frame"]) > max_start:
             continue
+        dh0 = float(np.hypot(float(cand[0]["x"]) - hand_x, float(cand[0]["y"]) - hand_y))
+        if dh0 > max_hand_dist:
+            continue
         cand = _refine_centroids(video_path, cand, frame_w, frame_h)
+        detected = [p for p in cand if p.get("source") != "interpolated"]
         cand = fill_every_frame(cand)
-        ok_flow, flow_note, flow_stats = validate_ball_path_on_video(video_path, cand, frame_w, frame_h)
+        # Interpolated points are the parabola we just fitted — LK on them is
+        # not evidence the blob is on the pixels. Validate detected samples only.
+        flow_pts = detected if len(detected) >= 6 else cand
+        ok_flow, flow_note, flow_stats = validate_ball_path_on_video(video_path, flow_pts, frame_w, frame_h)
         if not ok_flow:
             continue
         # Longer flights measure gravity and speed better; on a tie take the one
@@ -360,7 +378,10 @@ def _reassociate(
                 d = float(np.hypot(c["x"] - px, c["y"] - py))
                 if d > tol:
                     continue
-                cost = d + 0.6 * abs(float(c.get("r") or med_r) - med_r)
+                # Size consistency matters as much as proximity here: a nearby
+                # blob of the wrong size is a different object, and letting it win
+                # on distance alone makes the track alternate between the two.
+                cost = d + 1.5 * abs(float(c.get("r") or med_r) - med_r)
                 if cost < best_cost:
                     best_cost, best = cost, c
             if best is not None:
@@ -513,7 +534,8 @@ def _best_flight_path(
             seen_local.add(key)
             down = (c["x"] - hand_x) * dx + (c["y"] - hand_y) * dy
             dh = float(np.hypot(c["x"] - hand_x, c["y"] - hand_y))
-            if down < 20 or c["y"] > frame_h * 0.72:
+            turf_y = min(frame_h * 0.92, max(hand_y + 100.0, frame_h * 0.82))
+            if down < 20 or c["y"] > turf_y:
                 continue
             if dh < 36:
                 continue
@@ -572,24 +594,43 @@ def _best_flight_path(
 
 
 def _ballistic_clean(path: list[dict[str, Any]], frame_w: int, frame_h: int) -> list[dict[str, Any]]:
-    """Drop teleport / wrong-blob points that don't fit one flight parabola."""
+    """Drop points that do not sit on one flight parabola.
+
+    The tolerance comes from the fit's own residuals rather than a fixed number,
+    and the fit is repeated once on the survivors. A fixed tolerance has to be
+    loose enough for the worst clip, which on a sharp high-frame-rate track is
+    wide enough to admit a second blob alongside the ball; the detector then
+    alternates between the two and the per-frame speeds swing wildly. Scaling to
+    the residuals lets a clean track reject tightly and a noisy one stay
+    tolerant.
+    """
     if len(path) < 6:
         return path
-    ts = np.array([p["frame"] for p in path], dtype=float)
-    xs = np.array([p["x"] for p in path], dtype=float)
-    ys = np.array([p["y"] for p in path], dtype=float)
-    try:
-        cx, cy, t0 = _fit_xy(ts, xs, ys)
-    except Exception:
-        return path
-    tol = max(28.0, 0.018 * float(np.hypot(frame_w, frame_h)))
-    kept = []
-    for p in path:
-        t = float(p["frame"]) - t0
-        d = float(np.hypot(p["x"] - np.polyval(cx, t), p["y"] - np.polyval(cy, t)))
-        if d <= tol:
-            kept.append(p)
-    return kept if len(kept) >= 6 else path
+    current = sorted(path, key=lambda p: int(p["frame"]))
+    diag = float(np.hypot(frame_w, frame_h))
+    floor, ceiling = max(10.0, 0.006 * diag), max(28.0, 0.018 * diag)
+    for _ in range(2):
+        ts = np.array([p["frame"] for p in current], dtype=float)
+        xs = np.array([p["x"] for p in current], dtype=float)
+        ys = np.array([p["y"] for p in current], dtype=float)
+        try:
+            cx, cy, t0 = _fit_xy(ts, xs, ys)
+        except Exception:
+            return current
+        res = np.array([
+            float(np.hypot(p["x"] - np.polyval(cx, p["frame"] - t0),
+                           p["y"] - np.polyval(cy, p["frame"] - t0)))
+            for p in current
+        ])
+        mad = float(np.median(np.abs(res - np.median(res))))
+        tol = float(np.clip(float(np.median(res)) + 3.0 * 1.4826 * mad, floor, ceiling))
+        kept = [p for p, d in zip(current, res) if d <= tol]
+        if len(kept) < 6:
+            return current
+        if len(kept) == len(current):
+            return current
+        current = kept
+    return current
 
 
 def _blob_centroid(bgr: np.ndarray, x: float, y: float, rad: float) -> tuple[float, float] | None:

@@ -16,9 +16,9 @@ from app.pipeline import pose as posemod
 from app.pipeline.action import frame_by_index
 
 # Apparent shoulder breadth / nose–ankle height.
-# True side-on stacks the shoulders (~0.06–0.13). Front-on shows full breadth (~0.22+).
-# Open-chested bowling actions sit ~0.18–0.21 and still show the arm wheel in plane.
-FRONT_ON_RATIO = 0.22
+# True side-on stacks the shoulders (~0.06–0.13). Front-on shows full breadth (~0.23+).
+# Open-chested bowling actions sit ~0.18–0.22 and still show the arm wheel in plane.
+FRONT_ON_RATIO = 0.23
 THREE_QUARTER_RATIO = 0.145
 
 

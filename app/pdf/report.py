@@ -483,6 +483,41 @@ def build_pdf(
         # on whether MER was seen.
         ffc_to_mer = _dt_ms(phases, "front_foot_contact", "arm_horizontal", fps)
 
+    # Delivery classification + how the clip was timed. The capture rate belongs
+    # on the page because every speed and duration above it is divided by that
+    # number — if it was recovered from the ball's fall rather than read from the
+    # file, the reader should be able to see that.
+    legality = metrics.get("action_legality") or {}
+    pace = metrics.get("delivery_type") or {}
+    tbase = metrics.get("timebase") or {}
+    ext = legality.get("extension_deg")
+    verdict_label = {
+        "within_limit": "Within the 15° limit",
+        "borderline": "Borderline — re-film square-on",
+        "above_limit_screening": "Above 15° on this view (screening only)",
+        "flexing": "Elbow flexes into release — no extension",
+    }.get(legality.get("verdict"), "Not assessable from this camera angle")
+    story.append(Paragraph("DELIVERY & ARM ACTION", st["h2"]))
+    action_tbl = Table([
+        ["Metric", "Value"],
+        ["Pace band", pace.get("value") or "—"],
+        ["Pace band measured from", (pace.get("basis") or "—").replace("_", " ")],
+        ["Elbow angle at release (deg)", _fmt(_ok_val(metrics, "elbow_extension_deg"), 1)],
+        ["Elbow extension, arm-horizontal → release (deg)", _fmt(ext, 1)],
+        ["Throwing-action screening (ICC 15°)", verdict_label],
+        ["Capture frame rate (fps)", _fmt(tbase.get("fps"), 0)],
+        ["Frame rate source", "measured from ball's fall" if tbase.get("slow_motion") else "video file"],
+    ], colWidths=[110 * mm, 68 * mm])
+    action_tbl.setStyle(_table_style())
+    story.append(action_tbl)
+    if tbase.get("slow_motion"):
+        story.append(Spacer(1, 3))
+        story.append(Paragraph(str(tbase.get("note") or ""), st["small"]))
+    if legality.get("note"):
+        story.append(Spacer(1, 3))
+        story.append(Paragraph(str(legality["note"]), st["small"]))
+    story.append(Spacer(1, 8))
+
     story.append(Paragraph("STRIDE STEP", st["h2"]))
     stride_tbl = Table([
         ["Metric", "Value"],
@@ -516,6 +551,10 @@ def build_pdf(
     ], colWidths=[110 * mm, 68 * mm])
     time_tbl.setStyle(_table_style())
     story.append(time_tbl)
+    cons = metrics.get("speed_consistency") or {}
+    if cons.get("note"):
+        story.append(Spacer(1, 3))
+        story.append(Paragraph(str(cons["note"]), st["small"]))
     story.append(Spacer(1, 8))
 
     story.append(Paragraph("SCORES", st["h2"]))

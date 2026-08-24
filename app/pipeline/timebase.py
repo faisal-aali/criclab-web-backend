@@ -85,7 +85,7 @@ def measure_capture_fps(
     if fits is None:
         out["note"] = "Frame rate from the video file — could not fit the ball's flight"
         return out
-    (a_mean, _e_mean), (a_rel, e_rel), curve_source = fits
+    (a_mean, e_mean), (a_rel, e_rel), curve_source = fits
     out["gravity_px_per_frame2"] = round(a_rel, 5)
     out["gravity_px_per_frame2_mean"] = round(a_mean, 5)
     out["curvature_source"] = curve_source
@@ -95,8 +95,10 @@ def measure_capture_fps(
         out["note"] = "Frame rate from the video file — tracked path does not curve like free flight"
         return out
     sig = a_rel / e_rel if e_rel > 0 else 0.0
+    sig_mean = a_mean / e_mean if e_mean > 0 else 0.0
     out["significance"] = round(float(sig), 2)
-    if sig < MIN_SIGNIFICANCE:
+    out["significance_mean"] = round(float(sig_mean), 2)
+    if sig < MIN_SIGNIFICANCE and sig_mean < MIN_SIGNIFICANCE:
         out["note"] = (
             "Frame rate from the video file — the flight's curvature is too weak to "
             "measure the capture rate from gravity"

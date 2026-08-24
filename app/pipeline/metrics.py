@@ -51,13 +51,26 @@ PHASE_LABELS = {
 }
 
 
-def _robust_ball_kmh(speeds: list[float]) -> float | None:
-    """Median of the first flight intervals after dropping teleport spikes."""
-    if not speeds:
+def _robust_ball_kmh(speeds: list[float], fps: float) -> float | None:
+    """Median per-frame flight speed over the first ~0.12 s, spikes dropped.
+
+    This is a cross-check on the fitted release speed, never the reported value,
+    so it has to describe the same instant the fit describes. A window measured
+    in seconds rather than samples does that at any frame rate: on a long
+    120 fps flight it covers the opening third, where the ball is still near its
+    release plane; on a short 200 fps flight it spans the whole path, so a
+    detector alternating between the ball and a blob beside it averages out
+    instead of biasing one end.
+
+    Taken over the whole flight instead, it would read far below a correct fit
+    on any receding delivery — pixel speed decays as the ball goes downrange —
+    and would veto good measurements.
+    """
+    clean = [float(s) for s in speeds if s is not None]
+    if not clean:
         return None
-    window = [float(s) for s in speeds[: min(12, len(speeds))] if s is not None]
-    if not window:
-        return None
+    span = max(6, int(round(float(fps) * 0.12))) if fps and fps > 1 else 12
+    window = clean[: min(span, len(clean))]
     med = float(np.median(window))
     kept = [s for s in window if 0.4 * med <= s <= 2.2 * med]
     if len(kept) >= 3:
@@ -749,7 +762,7 @@ def compute_metrics(
                     b_mps = ball_px * use_mpp * fps
                     b_kmh = b_mps * 3.6
                 if frame_kmh:
-                    robust = _robust_ball_kmh(frame_kmh)
+                    robust = _robust_ball_kmh(frame_kmh, fps)
                     if b_kmh is None:
                         b_kmh = robust
                         b_mps = b_kmh / 3.6 if b_kmh is not None else None
