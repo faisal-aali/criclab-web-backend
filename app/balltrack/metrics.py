@@ -39,9 +39,18 @@ def analyze_delivery(
 
     line_m = None
     length_m = None
+    length_note = "Metres from bowler stumps toward the batter"
     if bounce and np.isfinite(bounce.get("length_m", float("nan"))):
-        length_m = float(np.clip(bounce["length_m"], 0, pitch_length_m))
-        line_m = float(bounce["width_m"] - STUMP_WIDTH_M / 2.0)
+        raw_len = float(bounce["length_m"])
+        # Reject — never clamp — a bounce that mapped off the pitch.
+        if 0.0 <= raw_len <= float(pitch_length_m):
+            length_m = raw_len
+            if np.isfinite(bounce.get("width_m", float("nan"))):
+                line_m = float(bounce["width_m"] - STUMP_WIDTH_M / 2.0)
+        else:
+            length_note = (
+                f"Bounce mapped to {raw_len:.1f} m, outside a {pitch_length_m:.1f} m pitch — not reported"
+            )
 
     conf = 0.0
     if kmh and bounce:
@@ -67,7 +76,7 @@ def analyze_delivery(
             "unit": "m",
             "confidence": conf if length_m is not None else 0,
             "status": "ok" if length_m is not None else "unavailable",
-            "note": "Metres from bowler stumps toward the batter",
+            "note": length_note,
         },
         "bounce": bounce,
         "n_points": len(pts),

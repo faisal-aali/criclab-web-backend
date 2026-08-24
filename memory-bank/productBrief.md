@@ -24,7 +24,7 @@ biomechanics PDF), but for **cricket bowling**.
 4. **Metrics dashboard** — **ball speed** only with an in-air lock (image-plane + height; not a gun), leave-hand arm/hand
    speed, release height/angle/time, joint angles, stride, rotation proxies
    (estimated), action scores from `status === ok` metrics only
-5. **Slow-motion overlay clip** — grayscale footage with SpinLab-style HUD; tiles match JSON
+5. **Slow-motion overlay clip** — original colour footage with SpinLab-style HUD; tiles match JSON
 6. **AI analysis** — Gemma (Ollama) coaches from structured metrics only; picks YouTube drills from a **closed catalog**
 7. **PDF report** — SpinLab-style cricket report + drill URLs as text
 8. **Ball flight** — behind-bowler clip + stump calibration → ICC-style speed/line/length (pitch-plane, not radar)

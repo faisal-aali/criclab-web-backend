@@ -125,15 +125,14 @@ def balltrack_tags(deliveries: list[dict[str, Any]]) -> list[str]:
     tags: list[str] = []
     for d in deliveries:
         m = d.get("metrics") or d
-        length = m.get("length_m") if isinstance(m.get("length_m"), dict) else None
-        line = m.get("line_m") if isinstance(m.get("line_m"), dict) else None
-        lv = (length or {}).get("value") if length else None
-        wv = (line or {}).get("value") if line else None
-        if lv is not None:
-            if float(lv) < 8.0 or float(lv) > 16.5:
+        length = _metric_ok(m, "length_m")
+        line = _metric_ok(m, "line_m")
+        if length:
+            lv = float(length["value"])
+            if lv < 8.0 or lv > 16.5:
                 if "length" not in tags:
                     tags.append("length")
-        if wv is not None and abs(float(wv)) > 0.45:
+        if line and abs(float(line["value"])) > 0.45:
             if "line" not in tags:
                 tags.append("line")
     return tags

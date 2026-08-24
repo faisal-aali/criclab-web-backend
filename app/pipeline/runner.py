@@ -71,7 +71,7 @@ async def run_analysis_job(
         ball_track = _track_ball_seeded(video_path, meta, pose_track, action, scale)
 
         # --- Timebase: is the clip slow motion? ---
-        # Every phase window ("the front foot plants 120-550 ms before release")
+        # Every phase window ("the front foot plants 60-600 ms before release")
         # is cut in frames from fps, so a wrong fps mis-detects the events
         # themselves. The ball's own fall says what the capture rate really was.
         tb = timebase.measure_capture_fps(ball_track, scale.get("meters_per_pixel"), fps)
@@ -155,7 +155,7 @@ async def run_analysis_job(
 
         # --- Agent narrative ---
         await repo.update_job(job_id, status="analyzing", progress=86, stage="agent", message="Generating AI coaching analysis")
-        previous = await repo.list_deliveries(limit=5)
+        previous = await repo.list_deliveries(limit=8, player_name=player_name)
         prev_metrics = [d.get("metrics") for d in previous if d.get("metrics")]
         comparison = ollama_agent.compare_deliveries(metrics, prev_metrics[:5])
         analysis = await ollama_agent.generate_report(
@@ -220,6 +220,9 @@ async def run_analysis_job(
             delivery_id=delivery_id,
             result={
                 "delivery_id": delivery_id,
+                "overlay_video_url": f"/artifacts/{job_id}/overlay.mp4",
+                "pdf_url": f"/artifacts/{job_id}/bowling_report.pdf",
+                "release_still_url": f"/artifacts/{job_id}/release.jpg",
                 "cloudinary_video_url": (cloud.get("video") or {}).get("playback_url"),
                 "cloudinary_pdf_url": (cloud.get("pdf") or {}).get("secure_url"),
             },

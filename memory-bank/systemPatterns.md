@@ -35,7 +35,7 @@ torso, fence, or a stationary tree is not a ball track: return null + reason.
   near-peak bowling-wrist speed after the highest hand, along the throw.
   If the ball is tracked, snap to the last frame the wrist is still on the
   back-projected in-air path. REL marker stays on the bowling wrist.
-- **Front-foot contact** = lead-ankle plant 120–550 ms before release (omitted if not found).
+- **Front-foot contact** = lead-ankle plant **60–600 ms** before release (omitted if not found).
 - **Back-foot contact** = trail-ankle plant before FFC (omitted if not found).
 - **MER** = max bowling-arm cocking between FFC and release (omitted if not found).
 - **Arm speed** = bowling-wrist px/frame **at leave-hand** (not cocking / gather peak) × scale × fps.
@@ -187,18 +187,21 @@ PT → **BFC** if the trail ankle plants.
 
 - One **delivery** (bowling action) document links to video, tracks, metrics, analysis
 - Store paths to artifacts (overlay video, release still, PDF), not giant binaries in documents when avoidable
-- Historical compare = query prior deliveries for same player/session
+- Historical compare = query prior deliveries for **the same player**; ball speed is never compared to arm speed
 
 ## Agentic layer (Ollama)
 
-Tools the agent may use (implement as real functions, not prompt fiction):
+Python helpers the runner actually calls (not Ollama tool-calling):
 
-- `getDeliveryMetrics`
-- `compareDeliveries`
-- `getPlayerHistory`
+- `getDeliveryMetrics` — compact `status === ok` view; includes pace band, throwing screen, timebase, speed consistency
+- `compareDeliveries` — ball-speed delta vs this bowler's prior deliveries; arm delta is a separate field
+- `generateReport` — coaching narrative + catalog-only drill IDs
+
+Planned (FEAT-015), not implemented — do not pretend they exist:
+
+- `getPlayerHistory` (beyond same-player last-N compare)
 - `searchCoachingMemory` (nomic embeddings)
 - `detectOutliers`
-- `generateReport` (structured sections for UI + PDF)
 
 Agent answers should cite measured differences, not vibes.
 

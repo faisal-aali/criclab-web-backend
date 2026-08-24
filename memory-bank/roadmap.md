@@ -11,7 +11,7 @@ High-level features. Detail lives in `tasks/`.
 | FEAT-005 | **Action/release detection** | Done | Throwing side (profile arm wins) + leave-hand release + action phases |
 | FEAT-006 | Calibration | Done (basic) | Scale from pose body height or provided reference |
 | FEAT-007 | **Biomechanics metrics** | Done | Leave-hand arm speed, joint angles, timing, rotation proxies, scores from ok metrics only |
-| FEAT-008 | **Slow-mo overlay video** | Done | SpinLab HUD: grayscale + 2×2 tiles + BFC/FFC/MER/REL/FT timeline |
+| FEAT-008 | **Slow-mo overlay video** | Done | SpinLab HUD: colour frames + 2×2 tiles + BFC/FFC/MER/REL/FT timeline |
 | FEAT-009 | **Cloudinary hosting** | Done | Upload processed video + PDF; return shareable URLs |
 | FEAT-010 | Results dashboard | Done | Cloudinary video + URL, metric cards, score rings, AI sections |
 | FEAT-011 | AI agent (Gemma) | Done | Coaching from metrics JSON; catalog-only drill IDs via `gemma3:4b` |
@@ -58,3 +58,7 @@ High-level features. Detail lives in `tasks/`.
   speed decays, and assuming it constant was discarding the frames nearest
   release. Ball speed is now read at release and always exceeds arm speed. New
   `delivery_type`, `action_legality` (conservatively gated), `speed_consistency`.
+- **24 Aug 2026 (audit):** Results UI now renders pace band, ICC 15° screening,
+  capture rate, and ball-vs-arm consistency. Compare is same-player ball speed
+  only (arm is a separate field). Ball-flight length rejects off-pitch bounces
+  instead of clipping them onto the square.

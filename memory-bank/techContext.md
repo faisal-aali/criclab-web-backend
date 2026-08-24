@@ -9,12 +9,12 @@ Sibling frontend: `../criclab-web-frontend` (Vite + React). This repo is the Fas
 | Backend | **Python FastAPI** | Orchestration, upload APIs, job status, PDF generation endpoints |
 | Pose engine | **MediaPipe BlazePose** (`opencv-contrib` + `mediapipe`) | 33 body landmarks/frame — the measurement engine |
 | Video / CV | OpenCV (bundled ffmpeg) | Frame extraction, overlay render, MP4 (avc1/H.264) encode |
-| Ball tracking | OpenCV MOG2 + RANSAC (best-effort) | Optional trajectory overlay only — NOT a headline metric |
+| Ball tracking | OpenCV MOG2 + RANSAC (best-effort) | Headline Action ball speed **only** with a validated in-air lock; otherwise `—` |
 | Motion engine | Custom Python metrics module | Arm speed, joint angles, timing, rotation proxies, scores |
 | Charts | **matplotlib** (Agg) | Joint-angle / hand-speed charts embedded in the PDF |
 | Database | **MongoDB** | Sessions, videos, deliveries, pose/metrics, analyses, agent runs |
 | Local LLM | **Ollama + `gemma3:4b`** | Coaching insights, PDF narrative, comparisons |
-| Embeddings | **Ollama + `nomic-embed-text`** | Semantic search over coaching notes / past observations |
+| Embeddings | **Ollama + `nomic-embed-text`** | Planned (FEAT-015) semantic search over coaching notes — not wired yet |
 | PDF | ReportLab (platypus + graphics) | SpinLab-style bowling report |
 | Object storage | **Cloudinary** (creds in `.env`) + local disk fallback | Processed overlay video + PDF hosting; returns shareable URL |
 
@@ -99,16 +99,17 @@ Frontend lives in the sibling repo `criclab-web-frontend/`.
 
 ## Bowling metrics (current)
 
-Computed from the **pose track** (not ball tracking):
+Pose drives mechanics. Ball km/h is a separate in-air measurement.
 
 - **Arm/hand speed** at leave-hand (km/h + m/s)
-- **Release** frame/point/height, **release time** (back-foot → release)
+- **Release** frame/point/height, **release time** (front-foot → release)
 - **Arm-swing angular speed** (deg/s)
 - **Hip / trunk rotation** (deg/s) — 2D side-on proxies, low confidence; reject outside a plausible band
 - **Joint angles** per phase
 - **Stride length** (% body height) at front-foot contact
 - **Action scores** (heuristic 0–100)
-- **Optional** ball trajectory overlay when a clean flight is tracked
+- **Headline ball km/h** only when an in-air lock passes geometry + sanity gates
+- **Pace band / throwing screen / speed consistency** — JSON + Results + PDF; screening refused unless the view earns it
 
 Everything scale-dependent is labelled **estimated** until calibrated.
 

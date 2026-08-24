@@ -44,8 +44,11 @@ async def insert_delivery(doc: dict[str, Any]) -> str:
     return doc["_id"]
 
 
-async def list_deliveries(limit: int = 50) -> list[dict[str, Any]]:
-    cursor = get_db().deliveries.find().sort("created_at", -1).limit(limit)
+async def list_deliveries(limit: int = 50, player_name: str | None = None) -> list[dict[str, Any]]:
+    query: dict[str, Any] = {}
+    if player_name:
+        query["player_name"] = player_name
+    cursor = get_db().deliveries.find(query).sort("created_at", -1).limit(limit)
     return await cursor.to_list(length=limit)
 
 

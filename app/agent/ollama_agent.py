@@ -92,6 +92,7 @@ def get_delivery_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
 
     scale = metrics.get("scale") or {}
     quality = metrics.get("quality") or {}
+    tb = metrics.get("timebase") or {}
     return {
         "throwing_side": metrics.get("throwing_side"),
         "release_frame": metrics.get("release_frame"),
@@ -106,10 +107,22 @@ def get_delivery_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "release_angle_deg": mv("release_angle_deg"),
         "stride_length_pct_height": mv("stride_length_pct_height"),
         "elbow_extension_deg": mv("elbow_extension_deg"),
+        "elbow_extension_range_deg": mv("elbow_extension_range_deg"),
         "front_knee_flexion_deg": mv("front_knee_flexion_deg"),
         "hip_shoulder_separation_deg": mv("hip_shoulder_separation_deg"),
+        "hip_to_trunk_peak_gap_ms": mv("hip_to_trunk_peak_gap_ms"),
         "line_m": mv("line_m"),
         "length_m": mv("length_m"),
+        "delivery_type": metrics.get("delivery_type"),
+        "action_legality": metrics.get("action_legality"),
+        "speed_consistency": metrics.get("speed_consistency"),
+        "timebase": {
+            "fps": tb.get("fps"),
+            "container_fps": tb.get("container_fps"),
+            "slow_motion": tb.get("slow_motion"),
+            "source": tb.get("source"),
+            "note": tb.get("note"),
+        },
         "scores": metrics.get("scores"),
         "sequencing_ok": metrics.get("sequencing_ok"),
         "scale": {"method": scale.get("method"), "calibrated": scale.get("calibrated"), "note": scale.get("note")},
@@ -121,36 +134,46 @@ def get_delivery_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
             "camera_view": quality.get("camera_view"),
             "camera_view_note": quality.get("camera_view_note"),
             "speed_view_ok": quality.get("speed_view_ok"),
+            "speed_view_from_ball": quality.get("speed_view_from_ball"),
+            "capture_fps": quality.get("capture_fps"),
+            "slow_motion": quality.get("slow_motion"),
         },
     }
 
 
-def compare_deliveries(current: dict[str, Any], previous: list[dict[str, Any]]) -> dict[str, Any]:
-    def speed(m: dict[str, Any]) -> float | None:
-        for key in ("ball_speed_kmh", "arm_speed_kmh"):
-            cell = m.get(key) or {}
-            if cell.get("status") != "ok":
-                continue
-            v = cell.get("value")
-            if v is None:
-                continue
-            v = float(v)
-            if v < 20.0 or v > 175.0:
-                continue
-            return v
+def _ok_speed(m: dict[str, Any], key: str) -> float | None:
+    cell = m.get(key) or {}
+    if cell.get("status") != "ok":
         return None
+    v = cell.get("value")
+    if v is None:
+        return None
+    v = float(v)
+    if v < 20.0 or v > 175.0:
+        return None
+    return v
 
-    cur = speed(current)
-    prev_speeds = [speed(p) for p in previous]
-    prev_speeds = [s for s in prev_speeds if s is not None]
-    delta = None
-    if cur is not None and prev_speeds:
-        delta = cur - (sum(prev_speeds) / len(prev_speeds))
+
+def compare_deliveries(current: dict[str, Any], previous: list[dict[str, Any]]) -> dict[str, Any]:
+    """Ball-speed delta only. Arm speed is a different quantity — never a stand-in."""
+    cur_ball = _ok_speed(current, "ball_speed_kmh")
+    prev_balls = [s for s in (_ok_speed(p, "ball_speed_kmh") for p in previous) if s is not None]
+    ball_delta = (cur_ball - (sum(prev_balls) / len(prev_balls))) if (cur_ball is not None and prev_balls) else None
+
+    cur_arm = _ok_speed(current, "arm_speed_kmh")
+    prev_arms = [s for s in (_ok_speed(p, "arm_speed_kmh") for p in previous) if s is not None]
+    arm_delta = (cur_arm - (sum(prev_arms) / len(prev_arms))) if (cur_arm is not None and prev_arms) else None
+
     return {
-        "current_speed_kmh": cur,
-        "previous_avg_speed_kmh": (sum(prev_speeds) / len(prev_speeds)) if prev_speeds else None,
-        "delta_kmh": delta,
-        "previous_count": len(prev_speeds),
+        "basis": "ball_speed" if cur_ball is not None else None,
+        "current_speed_kmh": cur_ball,
+        "previous_avg_speed_kmh": (sum(prev_balls) / len(prev_balls)) if prev_balls else None,
+        "delta_kmh": ball_delta,
+        "previous_count": len(prev_balls),
+        "current_arm_speed_kmh": cur_arm,
+        "previous_avg_arm_speed_kmh": (sum(prev_arms) / len(prev_arms)) if prev_arms else None,
+        "arm_delta_kmh": arm_delta,
+        "previous_arm_count": len(prev_arms),
     }
 
 
@@ -194,7 +217,10 @@ async def generate_report(
         "You do not measure speed or angles — never invent km/h, metres, or degrees. "
         "Coach to this bowler's age, height, bowling arm, and style (pace/spin/medium). "
         "Never claim radar-grade ball speed unless ball_speed_kmh status is ok — that value is still an estimate. "
-        "If ball speed is unavailable or camera_view is front_on, say so and do not substitute arm/hand speed as ball speed. "
+        "If ball speed is unavailable or speed_view_ok is false, say so and do not substitute arm/hand speed as ball speed. "
+        "If speed_consistency.ok is false, treat the ball figure as a lower bound (the delivery recedes from the camera). "
+        "If delivery_type.status is not ok, do not name a pace band. A stated bowling style is not a measurement. "
+        "If action_legality.verdict is null, do not call the action legal or illegal — the 15° test was not run. "
         "Never claim true 3D hip/trunk rotation from one camera. "
         "Give cricket-specific coaching from the available angles and timing. "
         "Keep each prose section to 1-3 short sentences. "
@@ -304,7 +330,7 @@ def _fallback_report(
     )
     hist = ""
     if comparison and comparison.get("delta_kmh") is not None:
-        hist = f"Speed delta vs recent average: {comparison['delta_kmh']:+.1f} km/h."
+        hist = f"Ball-speed delta vs this bowler's recent average: {comparison['delta_kmh']:+.1f} km/h."
     recs = fallback_picks(tags or [])
     rec_json = json.dumps(
         [{"drill_id": r["drill_id"], "reason": r["reason"], "priority": r["priority"]} for r in recs]
