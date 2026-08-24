@@ -155,28 +155,30 @@ def _refine_release_frame(
     return int(idxs[best_i])
 
 
-def snap_release_to_ball_leave(
+def ball_leave_frame(
     pose_track: dict[str, Any],
-    action: dict[str, Any],
+    side: str | None,
     ball_track: list[dict[str, Any]] | None,
-) -> None:
-    """Move release to the last pose frame where the wrist is still on the ball.
+    pose_release: int | None,
+) -> int | None:
+    """The last pose frame where the bowling wrist is still on the ball.
 
-    Fits the early in-air path and walks it backward to the bowling wrist.
-    REL stays on the hand — never on a ball already in the sky.
+    Fits the early in-air path and walks it backward to the wrist. This is the
+    ball's own account of when it left the hand, so it outranks any wrist-speed
+    heuristic — the hand keeps accelerating for a frame or two after the ball is
+    gone, and decelerates before it on a slower delivery.
     """
-    if not ball_track or not action.get("throwing_side"):
-        return
-    side = action["throwing_side"]
+    if not ball_track or not side:
+        return None
     frames = pose_track.get("frames") or []
     fps = float(pose_track.get("fps") or 30.0)
-    pose_rel = action.get("release_frame")
+    pose_rel = pose_release
     if pose_rel is None or not frames:
-        return
+        return None
 
     pts = sorted(ball_track, key=lambda p: int(p["frame"]))[:12]
     if len(pts) < 3:
-        return
+        return None
     ts = np.array([float(p["frame"]) for p in pts])
     xs = np.array([float(p["x"]) for p in pts])
     ys = np.array([float(p["y"]) for p in pts])
@@ -184,7 +186,7 @@ def snap_release_to_ball_leave(
         cx = np.polyfit(ts, xs, 1)
         cy = np.polyfit(ts, ys, 2 if len(pts) >= 5 else 1)
     except Exception:
-        return
+        return None
 
     first_f = int(pts[0]["frame"])
     search_lo = max(0, min(int(pose_rel), first_f) - int(round(fps * 0.10)))
@@ -208,7 +210,7 @@ def snap_release_to_ball_leave(
             best_fr = fr
 
     if best_fr is None or best_d > max(96.0, 3.2 * r0):
-        return
+        return None
 
     thresh = best_d + max(14.0, 0.45 * r0)
     leave = best_fr
@@ -217,7 +219,23 @@ def snap_release_to_ball_leave(
             leave = fr
         else:
             break
+    return int(leave)
 
+
+def snap_release_to_ball_leave(
+    pose_track: dict[str, Any],
+    action: dict[str, Any],
+    ball_track: list[dict[str, Any]] | None,
+) -> None:
+    """Move release onto the ball's leave-hand frame, in place.
+
+    REL stays on the hand — never on a ball already in the sky.
+    """
+    leave = ball_leave_frame(
+        pose_track, action.get("throwing_side"), ball_track, action.get("release_frame")
+    )
+    if leave is None:
+        return
     mer = (action.get("phases") or {}).get("max_external_rotation")
     if mer is not None:
         leave = max(int(leave), int(mer) + 1)
@@ -230,6 +248,44 @@ def snap_release_to_ball_leave(
     action.setdefault("phase_sources", {})["release"] = "wrist_closest_to_ball_path"
 
 
+def _plant_frame(
+    candidates: list[tuple[int, Any]],
+    *,
+    fps: float,
+    min_drop_px: float = 6.0,
+) -> int | None:
+    """First frame of the final plateau: when the ankle reached the height it holds.
+
+    A foot plants by descending and then staying put. Rather than hunting the
+    hardest downward strike — which on a high-frame-rate clip is a run-up stride,
+    not the delivery — we take the height the ankle sits at nearest the end of
+    the window and walk backward to the first frame it reached that height. That
+    is the contact frame, at any frame rate.
+
+    Returns None when the ankle is already planted across the whole window (the
+    contact happened before it) or never descends — both are honest "not seen".
+    """
+    if len(candidates) < 4:
+        return None
+    ys = [float(p[1]) for _, p in candidates]
+    y_smooth = _moving_avg(ys, _odd_win(max(3, int(round(fps * 0.03)))))
+    hi, lo = max(y_smooth), min(y_smooth)
+    if hi - lo < min_drop_px:
+        return None  # no descent in this window — nothing planted here
+    settled = float(y_smooth[-1])
+    if settled < hi - 0.35 * (hi - lo):
+        return None  # still travelling at the end of the window, not planted
+    # A planted foot sits within a couple of pixels of its settled height; the
+    # window's full range spans the run-up, so scale the tolerance tightly off it.
+    level = settled - max(2.0, 0.02 * (hi - lo))
+    j = len(y_smooth) - 1
+    while j > 0 and y_smooth[j - 1] >= level:
+        j -= 1
+    if j == 0:
+        return None  # planted for the whole window; contact is outside it
+    return int(candidates[j][0])
+
+
 def _detect_front_foot_contact(
     frames: list[dict[str, Any]],
     side: str,
@@ -237,41 +293,24 @@ def _detect_front_foot_contact(
     *,
     fps: float = 30.0,
 ) -> int | None:
-    """Lead ankle plant: lowest ankle after the fastest downward strike, 120–550 ms before release."""
+    """Lead-ankle plant before release.
+
+    The gap to release spans roughly 60-600 ms: pace bowlers land the front foot
+    ~100-160 ms before the ball leaves, and a slower action stretches further.
+    The old 120 ms floor cut off legitimate quick actions entirely.
+    """
     lead = "left" if side == "right" else "right"
     idxs, pts = _series(frames, f"{lead}_ankle")
     if len(pts) < 5:
         return None
 
-    min_gap = max(8, int(round(fps * 0.12)))
-    max_gap = max(min_gap + 5, int(round(fps * 0.55)))
+    min_gap = max(2, int(round(fps * 0.06)))
+    max_gap = max(min_gap + 6, int(round(fps * 0.60)))
     candidates = [
         (i, p) for i, p in zip(idxs, pts)
         if release_frame - max_gap <= i <= release_frame - min_gap
     ]
-    if len(candidates) < 4:
-        return None
-
-    ys = [float(p[1]) for _, p in candidates]
-    y_smooth = _moving_avg(ys, _odd_win(max(3, int(round(fps * 0.03)))))
-
-    best_strike = 0
-    best_vel = 0.0
-    for j in range(1, len(candidates)):
-        df = max(1, int(candidates[j][0]) - int(candidates[j - 1][0]))
-        vel = (y_smooth[j] - y_smooth[j - 1]) / df
-        if vel > best_vel:
-            best_vel = vel
-            best_strike = j
-
-    if best_vel < 0.08:
-        return None
-
-    # Plant is the lowest point shortly after the strike, not the strike itself.
-    look = max(2, int(round(fps * 0.08)))
-    plant_slice = list(range(best_strike, min(len(candidates), best_strike + look + 1)))
-    plant_j = max(plant_slice, key=lambda j: y_smooth[j])
-    return int(candidates[plant_j][0])
+    return _plant_frame(candidates, fps=fps)
 
 
 def _detect_back_foot_contact(
@@ -287,18 +326,13 @@ def _detect_back_foot_contact(
     if len(pts) < 5:
         return None
     end = int(ffc) if ffc is not None else int(release_frame)
-    min_before = max(4, int(round(fps * 0.04)))
+    min_before = max(2, int(round(fps * 0.03)))
     max_before = max(min_before + 6, int(round(fps * 0.70)))
     candidates = [
         (i, p) for i, p in zip(idxs, pts)
         if end - max_before <= i <= end - min_before
     ]
-    if len(candidates) < 4:
-        return None
-    ys = [float(p[1]) for _, p in candidates]
-    y_smooth = _moving_avg(ys, _odd_win(max(3, int(round(fps * 0.03)))))
-    plant_j = int(np.argmax(y_smooth))  # planted = lowest in the image (max Y)
-    return int(candidates[plant_j][0])
+    return _plant_frame(candidates, fps=fps)
 
 
 def _detect_mer(
@@ -369,8 +403,15 @@ def analyze_action(
     pose_track: dict[str, Any],
     *,
     bowling_arm: str | None = None,
+    release_override: int | None = None,
 ) -> dict[str, Any]:
-    """Return throwing side, release, FFC, and wrist peak on the bowling arm."""
+    """Return throwing side, release, FFC, and wrist peak on the bowling arm.
+
+    `release_override` pins release to a frame measured elsewhere — in practice
+    the frame the tracked ball left the hand. Every other event is searched
+    relative to release, so handing that in makes the whole phase set key off a
+    measurement instead of a wrist-speed heuristic.
+    """
     frames = pose_track.get("frames") or []
     result: dict[str, Any] = {
         "throwing_side": None,
@@ -408,7 +449,10 @@ def analyze_action(
         return result
 
     peak_pos = idxs.index(release_frame) if release_frame in idxs else int(np.argmax(speed))
-    release_frame = _refine_release_frame(frames, side, idxs, speed, peak_pos, fps)
+    if release_override is not None:
+        release_frame = int(release_override)
+    else:
+        release_frame = _refine_release_frame(frames, side, idxs, speed, peak_pos, fps)
     if release_frame in idxs:
         peak_pos = idxs.index(release_frame)
 
@@ -429,7 +473,7 @@ def analyze_action(
         "follow_through": int(follow),
     }
     sources: dict[str, str] = {
-        "release": "peak_wrist_speed_then_throw_axis",
+        "release": "ball_leave_hand" if release_override is not None else "peak_wrist_speed_then_throw_axis",
         "follow_through": "wrist_speed_decay",
     }
     if ffc is not None:

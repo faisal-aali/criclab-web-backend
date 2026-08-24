@@ -108,3 +108,16 @@ reuse, simplification, efficiency, altitude) surfaced 10 findings; fixes:
 Final state across fps paths: 203 fps ball 86.3 km/h, hip→MER→REL ordered;
 120 fps ball 78.4, hip 121 → trunk 182, sequencing True, gap 83 ms;
 30 fps hip 1082 → trunk 655, sequencing 100, ball honestly unavailable.
+
+## Branch status
+
+Committed on `refine/action-spinlab-parity` (`e883598` refine, `c09e117`
+review fixes) — 2 commits ahead of `main`, clean tree. **Not pushed**:
+`git push` returned 403 — the authenticated `gh` account has `pull:true,
+push:false` on `Techlio-Pvt-Ltd/criclab-web-backend`. Needs either write
+access granted to that account, or a fork + cross-fork PR (not done —
+awaiting the user's choice). Push once access exists:
+
+```bash
+git push -u origin refine/action-spinlab-parity
+```

@@ -24,8 +24,8 @@ from app.pipeline import action as action_mod
 from app.pipeline import calibrate, extract, pose as pose_mod
 from app.pipeline import metrics as metrics_mod
 from app.pipeline import render as render_mod
-from app.pipeline import track
-from app.pipeline.view import classify_camera_view, flight_geometry_ok
+from app.pipeline import timebase, track
+from app.pipeline.view import flight_geometry_ok
 from app.services import cloudinary_service
 
 
@@ -64,22 +64,54 @@ async def run_analysis_job(
         body_px = calibrate.upright_body_px_height(body_heights)
         scale = calibrate.resolve_scale(meters_per_pixel, reference_height_m, body_px)
 
-        DRAW_BALL = True
-        ball_track: list[dict[str, Any]] = []
-        if DRAW_BALL:
-            await repo.update_job(job_id, status="processing", progress=55, stage="ball", message="Tracking ball flight")
-            ball_track = _track_ball_seeded(video_path, meta, pose_track, action, scale)
-            # Drop a lock that would produce a false km/h *before* it can move REL.
-            view = classify_camera_view(pose_track, action)
-            geo_ok, _geo_reason = flight_geometry_ok(
-                ball_track,
-                int(meta.get("width") or pose_track.get("width") or 1280),
-                int(meta.get("height") or pose_track.get("height") or 720),
+        frame_w = int(meta.get("width") or pose_track.get("width") or 1280)
+        frame_h = int(meta.get("height") or pose_track.get("height") or 720)
+
+        await repo.update_job(job_id, status="processing", progress=55, stage="ball", message="Tracking ball flight")
+        ball_track = _track_ball_seeded(video_path, meta, pose_track, action, scale)
+
+        # --- Timebase: is the clip slow motion? ---
+        # Every phase window ("the front foot plants 120-550 ms before release")
+        # is cut in frames from fps, so a wrong fps mis-detects the events
+        # themselves. The ball's own fall says what the capture rate really was.
+        tb = timebase.measure_capture_fps(ball_track, scale.get("meters_per_pixel"), fps)
+
+        # The ball path is indexed by frame, so it does not change with the
+        # timebase and is never re-tracked here. What it does give us is the frame
+        # the ball left the hand — a measurement, where release detection from
+        # wrist speed alone is a heuristic. Re-run the action pass keyed to that
+        # frame (and to the corrected rate) so FFC, BFC and MER are searched
+        # relative to a real release rather than an estimated one.
+        leave = action_mod.ball_leave_frame(
+            pose_track, action.get("throwing_side"), ball_track, action.get("release_frame")
+        )
+        if tb.get("slow_motion"):
+            fps = float(tb["fps"])
+            pose_track["fps"] = fps
+            # Per-point km/h was baked in at the container rate while tracking.
+            # Leaving it would make the two ball-speed estimators disagree by
+            # exactly the slow-motion factor, and the disagreement guard would
+            # then refuse a speed we can measure perfectly well.
+            ball_track = track.annotate_frame_motion(
+                ball_track, fps, scale.get("meters_per_pixel")
             )
-            if ball_track and (not view.get("speed_ok") or not geo_ok):
-                ball_track = []
-            if ball_track:
-                action_mod.snap_release_to_ball_leave(pose_track, action, ball_track)
+        if tb.get("slow_motion") or leave is not None:
+            action = action_mod.analyze_action(
+                pose_track, bowling_arm=bowling_arm, release_override=leave
+            )
+
+        # Keep a lock that would produce a false km/h from ever moving REL.
+        geo_ok, _geo_reason = flight_geometry_ok(ball_track, frame_w, frame_h)
+        # A flight that measurably crosses the image *is* the evidence that this
+        # delivery happens in the image plane — stronger than the pose-based view
+        # guess, which reads a mixed action as front-on. Pose-only clips still
+        # defer to the view classifier inside metrics.
+        if ball_track and not geo_ok:
+            ball_track = []
+            if leave is not None:  # release was pinned to a flight we just rejected
+                action = action_mod.analyze_action(pose_track, bowling_arm=bowling_arm)
+        elif ball_track:
+            action_mod.snap_release_to_ball_leave(pose_track, action, ball_track)
 
         # --- Metrics ---
         await repo.update_job(job_id, status="processing", progress=60, stage="metrics", message="Calculating bowling metrics")
@@ -90,6 +122,7 @@ async def run_analysis_job(
             scale=scale,
             ball_track=ball_track,
             player_profile=player_profile,
+            timebase_info=tb,
         )
 
         # --- Slow-motion overlay video ---
@@ -107,6 +140,7 @@ async def run_analysis_job(
             player_name=player_name,
             release_still_path=release_still_path,
             stills_dir=stills_dir,
+            capture_fps=fps,
         )
 
         # --- Upload processed video to Cloudinary ---
@@ -164,6 +198,7 @@ async def run_analysis_job(
             "created_at": created,
             "meta": meta,
             "action": _strip_series(action),
+            "timebase": tb,
             "release": {"frame": action.get("release_frame"), **(metrics.get("release_point") or {})},
             "metrics": _strip_metric_series(metrics),
             "analysis": analysis,

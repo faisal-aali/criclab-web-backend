@@ -5,6 +5,12 @@
 **Priority:** P0
 **Date:** 13 Aug 2026
 
+> Superseded in part by **TASK-006**: hip/trunk rotation peaks and sequencing
+> now come from the measured stride-window peak (not "peak 2D hip–shoulder
+> change" generically), and overlay slow-mo is fps-normalized playback (not
+> "repeat frames in the delivery window" at a fixed rate). This file is kept
+> as the original build record.
+
 ## Why
 
 The results page already showed metrics, but (1) ball speed locked onto the

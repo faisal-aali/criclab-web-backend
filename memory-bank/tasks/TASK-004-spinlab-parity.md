@@ -4,6 +4,10 @@
 **Status:** Done
 **Priority:** P0
 
+> Superseded in part by **TASK-006**: release is leave-hand (not peak wrist
+> speed — that's MER/cocking), and overlay slow-mo cadence is fps-normalized,
+> not a fixed frame-repeat. This file is kept as the original build record.
+
 ## Why
 
 The ball-tracking metrics were wrong on real footage (e.g. 1814 km/h) and there

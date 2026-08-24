@@ -153,7 +153,11 @@ def track_ball_from_release(
         return []
 
     start = max(0, int(release_frame) - 2)
-    end = int(release_frame) + min(90, max(24, int(round(fps * 0.40))))
+    # Scan a generous span of frames, not a span of seconds: `fps` here is the
+    # container rate, which a slow-motion export understates several-fold, and a
+    # short scan yields too few in-air samples for either the speed fit or the
+    # gravity check in app.pipeline.timebase. Extra frames only cost decode time.
+    end = int(release_frame) + min(150, max(40, int(round(fps * 0.50))))
     hand_x, hand_y = float(wrist_xy[0]), float(wrist_xy[1])
     dx, dy = (1.0, -0.35)
     if throw_dir is not None:
@@ -200,9 +204,24 @@ def track_ball_from_release(
     path = _best_flight_path(per_frame, hand_x, hand_y, dx, dy, fps, meters_per_pixel, frame_w, frame_h)
     if len(path) < 6:
         return []
+    path = _longest_continuous(path)
+    if len(path) < 6:
+        return []
     path = _ballistic_clean(path, frame_w, frame_h)
     if len(path) < 6:
         return []
+    # Greedy chaining follows whatever is nearest, so a big arm/torso blob near
+    # release can capture the chain and hold it for several frames. Once a clean
+    # parabola exists, re-pick every frame against that model: the ball is the
+    # candidate on the curve, whatever else was closer to the previous point.
+    path = _reassociate(per_frame, path, frame_w, frame_h)
+    path = _longest_continuous(path)
+    if len(path) < 6:
+        return []
+    # The seed often latches a frame or two late (the hand is a bigger blob than
+    # the ball). Walk the clean parabola back toward the hand — those earliest
+    # samples are what release detection snaps to.
+    path = _extend_backward(per_frame, path, hand_x, hand_y, frame_w, frame_h)
     path = _refine_centroids(video_path, path, frame_w, frame_h)
     path = fill_every_frame(path)
     ok_flow, flow_note, flow_stats = validate_ball_path_on_video(video_path, path, frame_w, frame_h)
@@ -212,16 +231,145 @@ def track_ball_from_release(
     if path:
         path[0]["flow_note"] = flow_note
         path[0]["flow_stats"] = flow_stats
-    v_px = ballistic_release_speed_px_per_frame(path)
-    if v_px is not None and meters_per_pixel:
-        kmh = v_px * float(meters_per_pixel) * fps * 3.6
-        if kmh < 22:
-            return []
-    else:
-        speeds = [p.get("speed_kmh") for p in path if p.get("speed_kmh") is not None]
-        if speeds and float(np.median(speeds[: min(12, len(speeds))])) < 22:
-            return []
+    # No km/h floor here: `fps` at this point is the *container* rate, which a
+    # slow-motion export understates by 4-8×. Gating on km/h would throw away
+    # exactly the flights that app.pipeline.timebase needs to detect that, and
+    # a genuine ball would be discarded as "too slow". Speed sanity belongs in
+    # metrics, after the timebase is settled. What remains here is
+    # fps-independent: the path must actually cross the image (see
+    # view.flight_geometry_ok) and move with the optical flow (checked above).
     return path
+
+
+def _longest_continuous(path: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the longest run with no teleport between consecutive samples.
+
+    A ball's step between frames changes smoothly. A lock that jumps to a
+    floodlight flare or a post moves hundreds of pixels in one frame while the
+    real flight moved thirty — so the run is cut there rather than fitted
+    through, which would bend the parabola and corrupt every value read off it.
+    """
+    if len(path) < 4:
+        return path
+    pts = sorted(path, key=lambda p: int(p["frame"]))
+    steps = [
+        _dist(a, b) / max(1, int(b["frame"]) - int(a["frame"]))
+        for a, b in zip(pts, pts[1:])
+    ]
+    med = float(np.median(steps))
+    limit = max(3.0 * med, 40.0)
+    runs: list[list[dict[str, Any]]] = [[pts[0]]]
+    for step, nxt in zip(steps, pts[1:]):
+        if step <= limit:
+            runs[-1].append(nxt)
+        else:
+            runs.append([nxt])
+    return max(runs, key=len)
+
+
+def _reassociate(
+    per_frame: list[dict[str, Any]],
+    path: list[dict[str, Any]],
+    frame_w: int,
+    frame_h: int,
+    iterations: int = 2,
+) -> list[dict[str, Any]]:
+    """Re-pick one candidate per frame against the flight's own fitted model.
+
+    Greedy chaining is sequential, so one wrong pick drags the rest. Fitting
+    x(t) linear and y(t) quadratic to the surviving points and then choosing the
+    candidate nearest that curve is order-independent: it recovers frames the
+    chain skipped and drops the ones it took from the arm. Ball size is used as
+    a tie-break, so a torso blob sitting on the curve loses to the small round
+    thing beside it.
+    """
+    if len(path) < 5:
+        return path
+    tol = max(12.0, 0.009 * float(np.hypot(frame_w, frame_h)))
+    current = sorted(path, key=lambda p: int(p["frame"]))
+    for _ in range(max(1, iterations)):
+        ts = np.array([float(p["frame"]) for p in current])
+        xs = np.array([float(p["x"]) for p in current])
+        ys = np.array([float(p["y"]) for p in current])
+        if len(current) < 5 or ts[-1] <= ts[0]:
+            return current
+        try:
+            cx = np.polyfit(ts, xs, 1)
+            cy = np.polyfit(ts, ys, 2)
+        except Exception:
+            return current
+        med_r = float(np.median([float(p.get("r") or 8) for p in current])) or 8.0
+        picked: list[dict[str, Any]] = []
+        for item in per_frame:
+            fr = int(item["frame"])
+            px, py = float(np.polyval(cx, fr)), float(np.polyval(cy, fr))
+            best, best_cost = None, 1e18
+            for c in item["candidates"]:
+                d = float(np.hypot(c["x"] - px, c["y"] - py))
+                if d > tol:
+                    continue
+                cost = d + 0.6 * abs(float(c.get("r") or med_r) - med_r)
+                if cost < best_cost:
+                    best_cost, best = cost, c
+            if best is not None:
+                picked.append(_point(fr, best))
+        if len(picked) < 5:
+            return current
+        current = _largest_contiguous(picked, max_gap=3)
+        if len(current) < 5:
+            return sorted(path, key=lambda p: int(p["frame"]))
+    return current
+
+
+def _extend_backward(
+    per_frame: list[dict[str, Any]],
+    path: list[dict[str, Any]],
+    hand_x: float,
+    hand_y: float,
+    frame_w: int,
+    frame_h: int,
+) -> list[dict[str, Any]]:
+    """Prepend earlier detections that sit on the flight's own back-projection.
+
+    Stops at the hand: a candidate within a hand's reach of the wrist is the
+    hand (or the ball still in it), not a ball in flight.
+    """
+    if len(path) < 5:
+        return path
+    pts = sorted(path, key=lambda p: int(p["frame"]))
+    ts = np.array([float(p["frame"]) for p in pts])
+    xs = np.array([float(p["x"]) for p in pts])
+    ys = np.array([float(p["y"]) for p in pts])
+    try:
+        cx = np.polyfit(ts, xs, 1)
+        cy = np.polyfit(ts, ys, 2)
+    except Exception:
+        return path
+    tol = max(14.0, 0.010 * float(np.hypot(frame_w, frame_h)))
+    hand_reach = max(30.0, 2.0 * float(pts[0].get("r") or 12.0))
+    by_frame = {int(item["frame"]): item["candidates"] for item in per_frame}
+    first = int(pts[0]["frame"])
+    added: list[dict[str, Any]] = []
+    for fr in range(first - 1, first - 7, -1):
+        cands = by_frame.get(fr)
+        if not cands:
+            break
+        px, py = float(np.polyval(cx, fr)), float(np.polyval(cy, fr))
+        if float(np.hypot(px - hand_x, py - hand_y)) < hand_reach:
+            break  # back-projection has reached the hand — the ball was still held
+        pick, best = None, tol
+        for c in cands:
+            d = float(np.hypot(c["x"] - px, c["y"] - py))
+            if d < best:
+                best, pick = d, c
+        if pick is None:
+            break
+        if float(np.hypot(pick["x"] - hand_x, pick["y"] - hand_y)) < hand_reach:
+            break
+        added.append(_point(fr, pick))
+    if not added:
+        return pts
+    return sorted(added + pts, key=lambda p: int(p["frame"]))
 
 
 def _point(frame: int, c: dict[str, Any], source: str = "detected") -> dict[str, Any]:

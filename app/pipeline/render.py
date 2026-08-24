@@ -160,13 +160,18 @@ def render_overlay_video(
     player_name: str = "Bowler",
     release_still_path: Path | None = None,
     stills_dir: Path | None = None,
+    capture_fps: float | None = None,
 ) -> dict[str, Any]:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise ValueError(f"Could not open video: {video_path}")
-    in_fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+    # `capture_fps` is the rate the clip was really shot at (see
+    # app.pipeline.timebase). A slow-motion export carries the *playback* rate in
+    # its header, so trusting the header would make the overlay re-slow footage
+    # that is already slowed.
+    in_fps = float(capture_fps or cap.get(cv2.CAP_PROP_FPS) or 30.0)
     src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
     src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
 
