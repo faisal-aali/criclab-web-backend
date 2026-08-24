@@ -28,10 +28,9 @@ import numpy as np
 
 G_MPS2 = 9.81
 
-# Rates real cameras actually shoot at. A measured value inside SNAP_TOL of one
-# of these is reported as that rate — the fit is good to ~10%, not to 1 fps.
-COMMON_RATES = (30.0, 48.0, 50.0, 60.0, 90.0, 100.0, 120.0, 200.0, 240.0)
-SNAP_TOL = 0.20
+# How far a candidate capture rate may sit from the release-plane estimate.
+# The cubic term this estimate rests on is precise to roughly this much.
+RATE_TOL = 0.30
 
 MIN_FPS = 20.0
 MAX_FPS = 600.0
@@ -54,6 +53,7 @@ def measure_capture_fps(
     materially faster than the container claims.
     """
     out: dict[str, Any] = {
+        "ball_meters_per_pixel": None,
         "fps": float(container_fps),
         "container_fps": float(container_fps),
         "measured_fps": None,
@@ -81,18 +81,20 @@ def measure_capture_fps(
         out["note"] = "Frame rate from the video file — tracked flight too short to check"
         return out
 
-    fit = _quadratic_with_error(ts, ys)
-    if fit is None:
+    fits = _curvature_pair(ts, ys)
+    if fits is None:
         out["note"] = "Frame rate from the video file — could not fit the ball's flight"
         return out
-    a_px, a_err = fit  # a_px = d²y/dframe² (positive = falling, image y grows down)
-    out["gravity_px_per_frame2"] = round(a_px, 5)
+    (a_mean, _e_mean), (a_rel, e_rel), curve_source = fits
+    out["gravity_px_per_frame2"] = round(a_rel, 5)
+    out["gravity_px_per_frame2_mean"] = round(a_mean, 5)
+    out["curvature_source"] = curve_source
     out["points_used"] = len(pts)
 
-    if a_px <= 0:
+    if a_rel <= 0 or a_mean <= 0:
         out["note"] = "Frame rate from the video file — tracked path does not curve like free flight"
         return out
-    sig = a_px / a_err if a_err > 0 else 0.0
+    sig = a_rel / e_rel if e_rel > 0 else 0.0
     out["significance"] = round(float(sig), 2)
     if sig < MIN_SIGNIFICANCE:
         out["note"] = (
@@ -101,21 +103,31 @@ def measure_capture_fps(
         )
         return out
 
-    measured = float(np.sqrt(G_MPS2 / (float(meters_per_pixel) * a_px)))
-    if not np.isfinite(measured) or not (MIN_FPS <= measured <= MAX_FPS):
+    mpp = float(meters_per_pixel)
+    fps_rel = float(np.sqrt(G_MPS2 / (mpp * a_rel)))    # at release: unbiased, noisier
+    fps_mean = float(np.sqrt(G_MPS2 / (mpp * a_mean)))  # arc average: biased high by recession
+    if not np.isfinite(fps_rel) or not (MIN_FPS <= fps_rel <= MAX_FPS):
         out["note"] = "Frame rate from the video file — gravity check gave an impossible rate"
         return out
-    out["raw_measured_fps"] = round(measured, 1)
+    out["raw_measured_fps"] = round(fps_rel, 1)
+    out["raw_mean_arc_fps"] = round(fps_mean, 1)
 
-    ratio = measured / float(container_fps)
-    if ratio < DISAGREE_RATIO:
+    if fps_rel / float(container_fps) < DISAGREE_RATIO:
         out["note"] = (
             f"Frame rate {container_fps:.0f} fps from the video file, confirmed against "
-            f"the ball's fall ({measured:.0f} fps measured)"
+            f"the ball's fall ({fps_rel:.0f} fps measured)"
         )
+        out["ball_meters_per_pixel"] = _ball_scale(a_mean, float(container_fps))
         return out
 
-    used = _snap(measured)
+    used = _pick_rate(fps_rel, fps_mean, float(container_fps))
+    if used is None:
+        out["note"] = (
+            f"The ball's fall implies about {fps_rel:.0f} fps, which does not match any rate this "
+            f"{container_fps:.0f} fps file could have been exported from — leaving the file's rate alone"
+        )
+        return out
+    out["ball_meters_per_pixel"] = _ball_scale(a_mean, used)
     out.update(
         fps=used,
         measured_fps=used,
@@ -130,6 +142,35 @@ def measure_capture_fps(
         ),
     )
     return out
+
+
+def _pick_rate(fps_rel: float, fps_mean: float, container_fps: float) -> float | None:
+    """Choose the capture rate the clip could actually have been exported from.
+
+    Two measurements, with known and opposite error directions:
+
+    * `fps_mean`, from curvature averaged over the whole arc, is biased *high* —
+      the ball recedes, so late in the flight it appears to fall more slowly than
+      gravity. Depth only ever increases, so this is an upper bound.
+    * `fps_rel`, from curvature at the first sample, removes that drift and is
+      unbiased, but reading a cubic's middle term costs precision.
+
+    And a structural fact: a slow-motion export writes each captured frame as one
+    container frame, so the capture rate is a whole multiple of the container
+    rate. Among those multiples we take the fastest one the upper bound allows
+    that is still consistent with the release-plane estimate.
+    """
+    upper = fps_mean * 1.05
+    best: float | None = None
+    for k in (2, 3, 4, 5, 6, 8, 10):
+        rate = container_fps * k
+        if not (MIN_FPS <= rate <= MAX_FPS) or rate > upper:
+            continue
+        if abs(rate - fps_rel) / fps_rel > RATE_TOL:
+            continue
+        if best is None or rate > best:
+            best = rate
+    return best
 
 
 def _flight_points(ball_track: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -161,7 +202,47 @@ def _quadratic_with_error(ts: np.ndarray, ys: np.ndarray) -> tuple[float, float]
     return a_px, a_err
 
 
-def _snap(measured: float) -> float:
-    """Snap to the nearest rate a camera actually offers, when it is within tolerance."""
-    best = min(COMMON_RATES, key=lambda r: abs(measured - r) / r)
-    return best if abs(measured - best) / best <= SNAP_TOL else round(measured, 1)
+def _curvature_pair(ts: np.ndarray, ys: np.ndarray):
+    """Downward pixel acceleration measured two ways: arc-average and at release.
+
+    The average over the whole arc is biased low (so its implied frame rate is
+    biased high) because the ball recedes from the camera and its pixels come to
+    be worth more metres. A cubic absorbs that drift in its third term, leaving
+    the quadratic term as the curvature at the first sample, where the ball is
+    still at the bowler's own distance. Both are returned so the caller can use
+    the bias direction rather than guess at it.
+    """
+    t = ts - float(ts[0])
+    quad = _quadratic_with_error(ts, ys)
+    if quad is None:
+        return None
+    if len(ts) >= 10:
+        try:
+            coeffs, cov = np.polyfit(t, ys, 3, cov=True)
+            if np.all(np.isfinite(cov)):
+                a_px = 2.0 * float(coeffs[1])
+                a_err = 2.0 * float(np.sqrt(max(cov[1, 1], 0.0)))
+                if np.isfinite(a_px) and np.isfinite(a_err) and a_px > 0 and a_err > 0:
+                    return quad, (a_px, a_err), "cubic_at_release"
+        except Exception:
+            pass
+    return quad, quad, "quadratic_mean"
+
+
+def _ball_scale(a_px: float, fps: float) -> float | None:
+    """Metres per pixel *in the ball's own depth plane*, from how fast it falls.
+
+    The body-height scale assumes the ball flies at the bowler's distance from
+    the camera. It does not: a delivery travels downrange, away from the lens,
+    so its pixels are worth more metres than the bowler's. Gravity is a known
+    constant, so the ball's measured fall in px/frame² is a ruler for the plane
+    it is actually flying in — no assumption about where that plane is.
+
+    This is an average over the tracked arc, and it still cannot see motion
+    directly toward or away from the lens, so a speed built on it remains a
+    lower bound on the true release speed.
+    """
+    if a_px <= 0 or fps <= 0:
+        return None
+    mpp = G_MPS2 / (a_px * fps * fps)
+    return round(mpp, 8) if 1e-5 < mpp < 1.0 else None

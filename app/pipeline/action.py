@@ -108,7 +108,10 @@ def _refine_release_frame(
     """
     peak = speed[peak_pos]
     pre = max(1, int(round(fps * 0.04)))
-    post = max(4, int(round(fps * 0.14)))
+    # MER→leave is ~50–120 ms of real time, but a 30 fps container of slow-mo
+    # (or a peak that landed on cocking) needs a longer *frame* window or REL
+    # freezes while the ball is still in the hand.
+    post = max(8, int(round(fps * 0.32)))
     lo, hi = peak_pos, peak_pos
     while lo > 0 and idxs[peak_pos] - idxs[lo] <= pre:
         lo -= 1
@@ -126,7 +129,7 @@ def _refine_release_frame(
             mer_i = i
 
     wr_mer = _wrist_at(frames, side, idxs[mer_i])
-    later = min(hi, mer_i + max(3, int(round(fps * 0.08))))
+    later = min(hi, mer_i + max(4, int(round(fps * 0.12))))
     wr_later = _wrist_at(frames, side, idxs[later])
     if wr_later is None:
         wr_later = wr_mer
@@ -139,6 +142,7 @@ def _refine_release_frame(
 
     best_i = mer_i
     best_score = -1e18
+    min_travel = 18.0
     for i in range(mer_i, hi + 1):
         if speed[i] < 0.50 * peak and i > mer_i + 1:
             if speed[i] < 0.35 * peak:
@@ -146,12 +150,17 @@ def _refine_release_frame(
         wr = _wrist_at(frames, side, idxs[i])
         if wr is None:
             continue
+        travel = float(np.hypot(float(wr[0]) - float(wr_mer[0]), float(wr[1]) - float(wr_mer[1])))
+        if travel < min_travel:
+            continue  # still at cocking — the ball has not left
         proj = (float(wr[0]) - float(wr_mer[0])) * dx + (float(wr[1]) - float(wr_mer[1])) * dy
         # Prefer the last still-fast sample along the throw (leave-hand), not MER.
         score = proj + 0.25 * (speed[i] / max(peak, 1e-6)) * n
         if score >= best_score:
             best_score = score
             best_i = i
+    if best_i == mer_i:
+        best_i = min(hi, mer_i + 1)
     return int(idxs[best_i])
 
 
@@ -176,7 +185,13 @@ def ball_leave_frame(
     if pose_rel is None or not frames:
         return None
 
-    pts = sorted(ball_track, key=lambda p: int(p["frame"]))[:12]
+    pts = sorted(
+        [p for p in ball_track if p.get("source") != "interpolated"],
+        key=lambda p: int(p["frame"]),
+    )
+    if len(pts) < 3:
+        pts = sorted(ball_track, key=lambda p: int(p["frame"]))
+    pts = pts[:16]
     if len(pts) < 3:
         return None
     ts = np.array([float(p["frame"]) for p in pts])
@@ -189,8 +204,13 @@ def ball_leave_frame(
         return None
 
     first_f = int(pts[0]["frame"])
-    search_lo = max(0, min(int(pose_rel), first_f) - int(round(fps * 0.10)))
-    search_hi = first_f + 2
+    # Back-projecting the in-air parabola only stays valid near the first
+    # detected sample. A second-based window at a recovered 120 fps walks
+    # into the cocking loop, where the wrist is near the *imaginary*
+    # ballistic path and REL freezes while the ball is still held.
+    back = 10
+    search_lo = max(0, first_f - back, int(pose_rel) - back)
+    search_hi = first_f + 6
     r0 = float(pts[0].get("r") or 20.0)
 
     best_fr, best_d = None, 1e18

@@ -293,6 +293,44 @@ def _elbow_at(frames, side: str, target: int | None, fps: float) -> tuple[float 
     return float(ang), _arm_inplane_length(best, side)
 
 
+def _upper_arm_horizontal_frame(
+    frames,
+    side: str,
+    start_frame: int | None,
+    release_frame: int | None,
+    fps: float,
+) -> tuple[int | None, float]:
+    """Frame in the delivery swing where the upper arm passes horizontal.
+
+    ICC Article 6 measures elbow extension from this instant to release. Only the
+    second half of the front-foot-contact-to-release interval is searched: earlier
+    in the action the arm is still winding up and also passes horizontal, and
+    picking that crossing would compare a deeply cocked elbow against a straight
+    one and manufacture a huge false "extension".
+
+    Returns the frame and how many degrees off horizontal it actually was, so the
+    caller can refuse a swing that never really passes horizontal in view.
+    """
+    if release_frame is None:
+        return None, 999.0
+    lo = int(start_frame) if start_frame is not None else int(release_frame) - max(4, int(round(fps * 0.15)))
+    lo = int(lo + (int(release_frame) - lo) * 0.5)
+    best_fr, best_err = None, 999.0
+    for f in frames:
+        fr = int(f["frame"])
+        if fr < lo or fr > int(release_frame):
+            continue
+        ang = posemod.segment_angle_deg(
+            posemod.point(f, f"{side}_shoulder"), posemod.point(f, f"{side}_elbow")
+        )
+        if ang is None:
+            continue
+        err = min(abs(ang), abs(abs(ang) - 180.0))
+        if err < best_err:
+            best_err, best_fr = err, fr
+    return best_fr, best_err
+
+
 def _elbow_extension_range(
     frames,
     side: str,
@@ -301,65 +339,93 @@ def _elbow_extension_range(
     elbow_at_release: float | None,
     fps: float,
     body_px: float | None,
+    side_on_ok: bool,
 ) -> dict[str, Any]:
-    """Elbow straightening from upper-arm-horizontal to release, the chuck test.
+    """Elbow straightening from upper-arm-horizontal to release — the chuck test.
 
-    Returns the degrees of extension plus a verdict. This is a single-camera 2D
-    screening figure, not an ICC laboratory measurement (which uses marker-based
-    3D capture); the note says so wherever it is shown.
+    This is deliberately hard to satisfy. The ICC test is done with marker-based
+    3D capture for a reason: from one camera, an arm angled towards the lens
+    projects a straight elbow as a bent one, and the error runs to tens of
+    degrees — comfortably more than the 15 degrees the whole test turns on. A
+    verdict built on that would accuse a legal bowler of throwing, so we only
+    report one when the swing genuinely happens across the image, and we call it
+    screening even then.
+
+    `elbow_at_release_deg` is reported whenever the elbow is visible, because a
+    straight arm at release is worth showing on its own.
     """
-    out: dict[str, Any] = {"value": None, "verdict": None, "note": None,
-                           "elbow_at_arm_horizontal": None, "elbow_at_release": None}
-    start_fr = phases.get("arm_horizontal") or phases.get("max_external_rotation")
-    if start_fr is None or release_frame is None:
-        out["note"] = "Arm-horizontal position not detected — the 15° test needs both ends of the swing"
-        return out
-
-    ang_start, len_start = _elbow_at(frames, side, start_fr, fps)
-    ang_rel = elbow_at_release
-    _, len_rel = _elbow_at(frames, side, release_frame, fps)
-    if ang_start is None or ang_rel is None:
-        out["note"] = "Bowling elbow not visible through the swing — extension not measured"
-        return out
-
-    # A foreshortened arm fakes both angles. Require both ends to project to a
-    # real length relative to the bowler's own size.
-    min_len = max(24.0, 0.16 * float(body_px)) if body_px else 40.0
-    if (len_start or 0) < min_len or (len_rel or 0) < min_len:
+    out: dict[str, Any] = {
+        "value": None, "verdict": None, "note": None,
+        "elbow_at_arm_horizontal": None,
+        "elbow_at_release": None if elbow_at_release is None else round(float(elbow_at_release), 1),
+    }
+    if not side_on_ok:
         out["note"] = (
-            "Bowling arm points at the camera through the swing — a straight arm "
-            "projects as a bent one, so the 15° test would be false"
+            "The 15° throwing test is not run from this camera angle. Filmed anywhere but square "
+            "to the bowling arm, a straight elbow projects as a bent one by more than the 15° the "
+            "test turns on, so any verdict would be guesswork. Elbow angle at release is still shown."
+        )
+        return out
+    if release_frame is None:
+        out["note"] = "Release not detected — the 15° throwing test needs both ends of the swing"
+        return out
+
+    start_fr, horiz_err = _upper_arm_horizontal_frame(
+        frames, side, phases.get("front_foot_contact"), release_frame, fps
+    )
+    if start_fr is None or horiz_err > 20.0:
+        out["note"] = (
+            "The upper arm never passes clearly through horizontal in this view, so there is no "
+            "defined start point for the 15° throwing test"
         )
         return out
 
-    extension = float(ang_rel) - float(ang_start)
-    out["elbow_at_arm_horizontal"] = round(float(ang_start), 1)
-    out["elbow_at_release"] = round(float(ang_rel), 1)
-    out["value"] = round(extension, 1)
-    if extension > CHUCK_LIMIT_DEG:
-        out["verdict"] = "over_limit"
+    ang_start, len_start = _elbow_at(frames, side, start_fr, fps)
+    _, len_rel = _elbow_at(frames, side, release_frame, fps)
+    if ang_start is None or elbow_at_release is None:
+        out["note"] = "Bowling elbow not visible through the swing — extension not measured"
+        return out
+
+    # Both readings must come from an arm that projects to a real length, or the
+    # angles are projection artefacts rather than joint angles.
+    min_len = max(24.0, 0.16 * float(body_px)) if body_px else 40.0
+    if (len_start or 0) < min_len or (len_rel or 0) < min_len:
         out["note"] = (
-            f"Elbow straightens {extension:.0f}° from arm-horizontal to release — above the ICC 15° "
-            "limit on this 2D view. Screening only: confirm with a side-on, arm-across-frame clip "
-            "or an accredited 3D test before treating it as a called action."
+            "Bowling arm points at the camera through the swing — a straight arm projects as a bent "
+            "one, so the 15° test would be false"
+        )
+        return out
+
+    extension = float(elbow_at_release) - float(ang_start)
+    out["elbow_at_arm_horizontal"] = round(float(ang_start), 1)
+    out["value"] = round(extension, 1)
+    tail = (
+        " Screening from one camera, not an accredited test: only a 3D, marker-based assessment "
+        "can call an action."
+    )
+    if extension > CHUCK_LIMIT_DEG:
+        out["verdict"] = "above_limit_screening"
+        out["note"] = (
+            f"Elbow straightens about {extension:.0f}° from upper-arm-horizontal to release, above "
+            f"the ICC {CHUCK_LIMIT_DEG:.0f}° limit on this view." + tail
         )
     elif extension > CHUCK_WATCH_DEG:
         out["verdict"] = "borderline"
         out["note"] = (
-            f"Elbow straightens {extension:.0f}° — inside the ICC 15° limit but close enough that "
-            "camera angle alone could account for the gap. Worth re-filming square-on."
+            f"Elbow straightens about {extension:.0f}° — inside the ICC {CHUCK_LIMIT_DEG:.0f}° limit, "
+            "but close enough that camera angle alone could account for the gap." + tail
         )
     elif extension < -CHUCK_WATCH_DEG:
         out["verdict"] = "flexing"
         out["note"] = (
-            f"Elbow bends {abs(extension):.0f}° into release rather than straightening — no "
-            "extension to test. Legal on this measure."
+            f"The elbow bends {abs(extension):.0f}° into release rather than straightening, so there "
+            "is no extension to test. Clear on this measure." + tail
         )
     else:
-        out["verdict"] = "legal"
+        out["verdict"] = "within_limit"
         out["note"] = (
-            f"Elbow straightens {extension:.0f}° from arm-horizontal to release — well inside the "
-            "ICC 15° limit (2D screening estimate)."
+            f"Elbow straightens about {extension:.0f}° from upper-arm-horizontal to release, well "
+            f"inside the ICC {CHUCK_LIMIT_DEG:.0f}° limit." + tail
         )
     return out
 
@@ -648,6 +714,8 @@ def compute_metrics(
     ball_conf = 0.0
     ball_raw = None
     ball_px = None
+    ball_scale_basis = None
+    ball_depth_ratio = None
     geo_ok, geo_reason = ball_geo_ok, _ball_geo_reason
     if not speed_view_ok:
         ball_note = camera_view.get("note") or "Camera angle cannot yield a truthful ball speed"
@@ -657,7 +725,7 @@ def compute_metrics(
         ball_status = "unavailable"
     elif ball_track and len(ball_track) >= 4:
         frame_kmh = [float(p["speed_kmh"]) for p in ball_track if p.get("speed_kmh") is not None]
-        ball_px = ballistic_release_speed_px_per_frame(ball_track)
+        ball_px = ballistic_release_speed_px_per_frame(ball_track, fps)
         if ball_px is None:
             ball_px = flight_release_speed_px_per_frame(ball_track)
         if frame_kmh or (ball_px and ball_px > 0):
@@ -667,8 +735,18 @@ def compute_metrics(
             else:
                 b_kmh = None
                 b_mps = None
+                # Release speed is read off the first frames of flight, and in
+                # those frames the ball has only just left the hand — it is still
+                # at the bowler's own distance from the camera, which is exactly
+                # the plane the height scale calibrates. So the body scale is the
+                # right one here. The ball's own gravity-derived scale, averaged
+                # over the whole arc, describes where it ends up, not where it
+                # was released, and is carried as a diagnostic only.
+                ball_mpp = (timebase_info or {}).get("ball_meters_per_pixel")
+                depth_ratio = (ball_mpp / mpp) if (ball_mpp and mpp) else None
+                use_mpp, scale_basis = mpp, "bowler_height_plane"
                 if ball_px and ball_px > 0:
-                    b_mps = ball_px * mpp * fps
+                    b_mps = ball_px * use_mpp * fps
                     b_kmh = b_mps * 3.6
                 if frame_kmh:
                     robust = _robust_ball_kmh(frame_kmh)
@@ -710,9 +788,19 @@ def compute_metrics(
                     ball_status = "ok"
                     ball_conf = min(0.8, 0.35 + 0.04 * len(ball_track) + scale_conf * 0.25)
                     ball_note = (
-                        "Image-plane estimate (height scale) from the in-air path — not a radar gun. "
-                        "For broadcast-style speed, line and length, use Ball flight."
+                        "Release speed measured over the first frames after the ball leaves the hand, "
+                        "where it is still at your own distance from the camera. This is the speed "
+                        "across the image only — a single camera cannot see how fast the ball also "
+                        "travels away from the lens, so on anything but a square-on view the true "
+                        "release speed is higher than this. Not a radar gun."
                     )
+                    if depth_ratio and depth_ratio > 1.15:
+                        ball_note += (
+                            f" On this clip the ball recedes to about {depth_ratio:.1f}x its release "
+                            "distance during the tracked flight, so expect a real gap."
+                        )
+                    ball_scale_basis = scale_basis
+                    ball_depth_ratio = depth_ratio
     else:
         ball_note = "Ball flight not tracked — use a side-on clip with a visible red or white ball after release"
 
@@ -1067,11 +1155,39 @@ def compute_metrics(
     )
 
     # Overlay / results share this 4-item sequence (omit a row if the frame was not seen).
+    # --- Consistency: the ball cannot leave slower than the wrist that threw it ---
+    # The ball sits beyond the wrist on the same rotating arm, so its release
+    # speed is always the greater of the two (typically 1.1-1.5x). If the numbers
+    # come out the other way round, one of them is foreshortened — almost always
+    # the ball, which travels downrange away from the lens while the wrist stays
+    # in the bowler's plane. We do not "correct" it; we say so and mark the ball
+    # figure as a floor.
+    speed_consistency: dict[str, Any] = {"ok": None, "ratio": None, "note": None}
+    if ball_speed_kmh is not None and arm_speed_kmh:
+        ratio = float(ball_speed_kmh) / float(arm_speed_kmh)
+        speed_consistency["ratio"] = round(ratio, 2)
+        speed_consistency["ok"] = ratio >= 1.0
+        if ratio < 1.0:
+            speed_consistency["note"] = (
+                f"Measured ball speed ({ball_speed_kmh:.0f} km/h) came out below bowling-hand speed "
+                f"({arm_speed_kmh:.0f} km/h), which cannot happen physically — the ball leaves from "
+                "beyond the wrist on the same arm. The ball is travelling partly away from the camera, "
+                "so its on-screen speed under-reads. Treat the ball figure as a lower bound and re-film "
+                "square-on to the delivery for a truer number."
+            )
+            ball_conf = min(ball_conf, 0.3)
+            ball_note = f"{ball_note} {speed_consistency['note']}"
+        else:
+            speed_consistency["note"] = (
+                f"Ball leaves {ratio:.2f}x the bowling-hand speed — consistent with the ball sitting "
+                "beyond the wrist on the same arm"
+            )
+
     # --- Action legality (chuck screening) and pace band ---
     legality = _elbow_extension_range(
         frames, side or "right", phases, release_frame,
         elbow_val if elbow_val is not None else rel_angles.get("elbow_extension"),
-        fps, body_px,
+        fps, body_px, stride_view_ok,
     )
     pace = _classify_delivery_pace(
         ball_speed_kmh, arm_speed_kmh, profile.get("bowling_style"),
@@ -1211,6 +1327,7 @@ def compute_metrics(
         ),
         "action_legality": {
             "verdict": legality["verdict"],
+            "assessable": legality["verdict"] is not None,
             "limit_deg": CHUCK_LIMIT_DEG,
             "extension_deg": legality["value"],
             "elbow_at_arm_horizontal_deg": legality["elbow_at_arm_horizontal"],
@@ -1218,6 +1335,9 @@ def compute_metrics(
             "note": legality["note"],
             "status": "ok" if legality["verdict"] is not None else "unavailable",
         },
+        "speed_consistency": speed_consistency,
+        "ball_speed_scale_basis": ball_scale_basis,
+        "ball_depth_ratio": ball_depth_ratio,
         "delivery_type": {
             "value": pace["value"],
             "basis": pace["basis"],

@@ -100,6 +100,21 @@ def build_trajectory(
     return _largest_contiguous(best_inliers)
 
 
+def _fit_xy(ts: np.ndarray, xs: np.ndarray, ys: np.ndarray):
+    """Fit the flight's image path: x AND y quadratic in frame index.
+
+    x(t) is often modelled as a straight line, on the reasoning that horizontal
+    velocity is constant. That holds in the world, not in the image: a delivery
+    travels downrange, away from the lens, so its pixels-per-frame decay through
+    the flight. Fitting x linearly mis-predicts the frames nearest release by
+    tens of pixels — which is exactly where release speed is read — and an
+    outlier filter built on it throws that early flight away.
+    """
+    deg = 2 if len(ts) >= 6 else 1
+    t = ts - float(ts[0])
+    return np.polyfit(t, xs, deg), np.polyfit(t, ys, deg), float(ts[0])
+
+
 def _largest_contiguous(points: list[dict[str, Any]], max_gap: int = 8) -> list[dict[str, Any]]:
     """Keep the longest run of points without large frame gaps (one flight)."""
     if not points:
@@ -152,7 +167,7 @@ def track_ball_from_release(
     if release_frame is None or wrist_xy is None:
         return []
 
-    start = max(0, int(release_frame) - 2)
+    start = max(0, int(release_frame) - 8)
     # Scan a generous span of frames, not a span of seconds: `fps` here is the
     # container rate, which a slow-motion export understates several-fold, and a
     # short scan yields too few in-air samples for either the speed fit or the
@@ -163,6 +178,13 @@ def track_ball_from_release(
     if throw_dir is not None:
         n = float(np.hypot(throw_dir[0], throw_dir[1])) or 1.0
         dx, dy = float(throw_dir[0]) / n, float(throw_dir[1]) / n
+    # Elbow→wrist at cocking points at the sky. A cricket ball leaves along the
+    # pitch, so a near-vertical "throw" would reject the real in-air path.
+    if abs(dy) > abs(dx) * 1.25:
+        dx = 1.0 if dx >= 0 else -1.0
+        dy = -0.18
+        n = float(np.hypot(dx, dy)) or 1.0
+        dx, dy = dx / n, dy / n
 
     per_frame: list[dict[str, Any]] = []
     prev_gray = None
@@ -171,9 +193,10 @@ def track_ball_from_release(
         elapsed = max(0, idx - int(release_frame))
         dark = detect.detect_dark_flight_candidates(bgr)
         color = detect.detect_ball_color_candidates(bgr)
+        bright = detect.detect_bright_flight_candidates(bgr)
         motion = detect.detect_ball_motion_candidates(prev_gray, gray) if prev_gray is not None else []
         hough = hough_ball_candidates(bgr)
-        cands = detect.merge_ball_candidates(dark, color, motion, hough)
+        cands = detect.merge_ball_candidates(dark, color, bright, motion, hough)
         min_hand = 48.0 if elapsed >= 4 else 12.0
         max_r = min(frame_w, frame_h) * 0.065
         # Downrange side follows the throw direction — never assume rightward.
@@ -192,7 +215,7 @@ def track_ball_from_release(
             dh = float(np.hypot(c["x"] - hand_x, c["y"] - hand_y))
             if dh < min_hand:
                 continue
-            if c["y"] > frame_h * 0.72:
+            if c["y"] > frame_h * 0.78:
                 continue
             down = (c["x"] - hand_x) * dx + (c["y"] - hand_y) * dy
             if elapsed >= 4 and down < 8:
@@ -201,44 +224,73 @@ def track_ball_from_release(
         per_frame.append({"frame": int(idx), "candidates": filtered})
         prev_gray = gray
 
-    path = _best_flight_path(per_frame, hand_x, hand_y, dx, dy, fps, meters_per_pixel, frame_w, frame_h)
-    if len(path) < 6:
+    # Two independent ways to find the flight, because each fails differently.
+    # Greedy chaining follows the nearest candidate and can be captured by a big
+    # arm or torso blob near release; ballistic RANSAC is order-independent and
+    # scores whole hypotheses by how many candidates fit one parabola, so it
+    # survives the ball being missed on a few frames. Both are carried through to
+    # optical-flow validation and the better *surviving* one wins — picking a
+    # single favourite up front loses the real flight when that favourite fails.
+    seeds: list[list[dict[str, Any]]] = []
+    greedy = _best_flight_path(per_frame, hand_x, hand_y, dx, dy, fps, meters_per_pixel, frame_w, frame_h)
+    if len(greedy) >= 6:
+        seeds.append(greedy)
+    ransac = build_trajectory(per_frame, frame_w, frame_h, min_len=6)
+    if len(ransac) >= 6:
+        seeds.append([_point(p["frame"], p) for p in ransac])
+    if not seeds:
         return []
-    path = _longest_continuous(path)
-    if len(path) < 6:
+
+    # The ball leaves the hand at release. A path that only starts well after it
+    # is something else in the scene that happens to move consistently — on a
+    # 200 fps clip, RANSAC will happily find a long, clean, entirely wrong one
+    # in the background once the real flight has left the frame.
+    max_start = int(release_frame) + max(4, int(round(fps * 0.15)))
+
+    best: list[dict[str, Any]] = []
+    best_key: tuple[int, int] | None = None
+    for seed in seeds:
+        cand = _longest_continuous(seed)
+        if len(cand) < 6:
+            continue
+        cand = _ballistic_clean(cand, frame_w, frame_h)
+        if len(cand) < 6:
+            continue
+        # Once a clean parabola exists, re-pick every frame against that model:
+        # the ball is the candidate on the curve, whatever else happened to be
+        # closer to the previous point.
+        cand = _reassociate(per_frame, cand, frame_w, frame_h)
+        cand = _longest_continuous(cand)
+        if len(cand) < 6:
+            continue
+        # The seed often latches a frame or two late (the hand is a bigger blob
+        # than the ball). Walk the clean parabola back toward the hand — those
+        # earliest samples are what release speed and release detection use.
+        cand = _extend_backward(per_frame, cand, hand_x, hand_y, frame_w, frame_h)
+        if int(cand[0]["frame"]) > max_start:
+            continue
+        cand = _refine_centroids(video_path, cand, frame_w, frame_h)
+        cand = fill_every_frame(cand)
+        ok_flow, flow_note, flow_stats = validate_ball_path_on_video(video_path, cand, frame_w, frame_h)
+        if not ok_flow:
+            continue
+        # Longer flights measure gravity and speed better; on a tie take the one
+        # that starts earlier, because release speed is read off the first frames.
+        key = (len(cand), -int(cand[0]["frame"]))
+        if best_key is None or key > best_key:
+            best_key, best = key, cand
+            best[0]["flow_note"] = flow_note
+            best[0]["flow_stats"] = flow_stats
+    if len(best) < 6:
         return []
-    path = _ballistic_clean(path, frame_w, frame_h)
-    if len(path) < 6:
-        return []
-    # Greedy chaining follows whatever is nearest, so a big arm/torso blob near
-    # release can capture the chain and hold it for several frames. Once a clean
-    # parabola exists, re-pick every frame against that model: the ball is the
-    # candidate on the curve, whatever else was closer to the previous point.
-    path = _reassociate(per_frame, path, frame_w, frame_h)
-    path = _longest_continuous(path)
-    if len(path) < 6:
-        return []
-    # The seed often latches a frame or two late (the hand is a bigger blob than
-    # the ball). Walk the clean parabola back toward the hand — those earliest
-    # samples are what release detection snaps to.
-    path = _extend_backward(per_frame, path, hand_x, hand_y, frame_w, frame_h)
-    path = _refine_centroids(video_path, path, frame_w, frame_h)
-    path = fill_every_frame(path)
-    ok_flow, flow_note, flow_stats = validate_ball_path_on_video(video_path, path, frame_w, frame_h)
-    if not ok_flow:
-        return []
-    path = annotate_frame_motion(path, fps, meters_per_pixel)
-    if path:
-        path[0]["flow_note"] = flow_note
-        path[0]["flow_stats"] = flow_stats
     # No km/h floor here: `fps` at this point is the *container* rate, which a
-    # slow-motion export understates by 4-8×. Gating on km/h would throw away
-    # exactly the flights that app.pipeline.timebase needs to detect that, and
-    # a genuine ball would be discarded as "too slow". Speed sanity belongs in
+    # slow-motion export understates by 4-8x. Gating on km/h would throw away
+    # exactly the flights that app.pipeline.timebase needs to detect that, and a
+    # genuine ball would be discarded as "too slow". Speed sanity belongs in
     # metrics, after the timebase is settled. What remains here is
-    # fps-independent: the path must actually cross the image (see
-    # view.flight_geometry_ok) and move with the optical flow (checked above).
-    return path
+    # fps-independent: the path must cross the image (view.flight_geometry_ok)
+    # and move with the optical flow (checked above).
+    return annotate_frame_motion(best, fps, meters_per_pixel)
 
 
 def _longest_continuous(path: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -294,15 +346,15 @@ def _reassociate(
         if len(current) < 5 or ts[-1] <= ts[0]:
             return current
         try:
-            cx = np.polyfit(ts, xs, 1)
-            cy = np.polyfit(ts, ys, 2)
+            cx, cy, t0 = _fit_xy(ts, xs, ys)
         except Exception:
             return current
         med_r = float(np.median([float(p.get("r") or 8) for p in current])) or 8.0
         picked: list[dict[str, Any]] = []
         for item in per_frame:
             fr = int(item["frame"])
-            px, py = float(np.polyval(cx, fr)), float(np.polyval(cy, fr))
+            t = float(fr) - t0
+            px, py = float(np.polyval(cx, t)), float(np.polyval(cy, t))
             best, best_cost = None, 1e18
             for c in item["candidates"]:
                 d = float(np.hypot(c["x"] - px, c["y"] - py))
@@ -341,8 +393,7 @@ def _extend_backward(
     xs = np.array([float(p["x"]) for p in pts])
     ys = np.array([float(p["y"]) for p in pts])
     try:
-        cx = np.polyfit(ts, xs, 1)
-        cy = np.polyfit(ts, ys, 2)
+        cx, cy, t0 = _fit_xy(ts, xs, ys)
     except Exception:
         return path
     tol = max(14.0, 0.010 * float(np.hypot(frame_w, frame_h)))
@@ -350,11 +401,11 @@ def _extend_backward(
     by_frame = {int(item["frame"]): item["candidates"] for item in per_frame}
     first = int(pts[0]["frame"])
     added: list[dict[str, Any]] = []
-    for fr in range(first - 1, first - 7, -1):
+    for fr in range(first - 1, first - 14, -1):
         cands = by_frame.get(fr)
         if not cands:
             break
-        px, py = float(np.polyval(cx, fr)), float(np.polyval(cy, fr))
+        px, py = float(np.polyval(cx, fr - t0)), float(np.polyval(cy, fr - t0))
         if float(np.hypot(px - hand_x, py - hand_y)) < hand_reach:
             break  # back-projection has reached the hand — the ball was still held
         pick, best = None, tol
@@ -441,12 +492,19 @@ def _best_flight_path(
 ) -> list[dict[str, Any]]:
     """Pick the moving downrange object — not the hand, not a tree."""
     max_step = _max_step_px(fps, mpp, frame_w, frame_h)
-    seed_horizon = min(len(per_frame), max(8, int(round(fps * 0.18))))
+    # Seed in *frames*, not seconds of container fps — an early pose-REL sits at
+    # cocking, and the white ball only becomes a free blob 8–20 frames later.
+    seed_horizon = min(len(per_frame), max(24, int(round(fps * 0.35))))
     raw: list[tuple[float, int, dict[str, Any]]] = []
     for i, item in enumerate(per_frame[:seed_horizon]):
-        sky = [c for c in item["candidates"] if c["y"] < frame_h * 0.48]
-        ranked = sorted(item["candidates"], key=lambda c: c.get("r") or 0, reverse=True)
-        pool = ranked[:4] + sorted(sky, key=lambda c: c.get("r") or 0, reverse=True)[:3]
+        mid = [c for c in item["candidates"] if c["y"] < frame_h * 0.70]
+        ranked = sorted(item["candidates"], key=lambda c: c.get("score") or 0, reverse=True)
+        compact = sorted(
+            [c for c in item["candidates"] if float(c.get("r") or 0) <= min(frame_w, frame_h) * 0.03],
+            key=lambda c: c.get("score") or 0,
+            reverse=True,
+        )
+        pool = ranked[:4] + compact[:4] + sorted(mid, key=lambda c: c.get("r") or 0, reverse=True)[:3]
         seen_local = set()
         for c in pool:
             key = (int(c["x"]) // 25, int(c["y"]) // 25)
@@ -455,12 +513,16 @@ def _best_flight_path(
             seen_local.add(key)
             down = (c["x"] - hand_x) * dx + (c["y"] - hand_y) * dy
             dh = float(np.hypot(c["x"] - hand_x, c["y"] - hand_y))
-            if down < 20 or c["y"] > frame_h * 0.65:
+            if down < 20 or c["y"] > frame_h * 0.72:
                 continue
             if dh < 36:
                 continue
             air = max(0.0, hand_y - c["y"])
-            score = float(c.get("r") or 4) * (1.0 + air / 80.0)
+            r = float(c.get("r") or 4)
+            # Prefer cricket-ball sized movers over poster-sized blobs that happen
+            # to sit downrange of the hand.
+            size_fit = 1.0 if r <= 18 else max(0.25, 18.0 / r)
+            score = float(c.get("score") or r) * (1.0 + air / 80.0) * size_fit
             raw.append((score, i, c))
     raw.sort(key=lambda t: t[0], reverse=True)
     seeds: list[tuple[float, int, dict[str, Any]]] = []
@@ -491,10 +553,16 @@ def _best_flight_path(
         span = max(1, int(chain[-1]["frame"]) - int(chain[0]["frame"]))
         if med_step < 3.0 or (net / span) < 3.0:
             continue
-        move = (chain[-1]["x"] - chain[0]["x"], chain[-1]["y"] - chain[0]["y"])
+        # Alignment is measured over the first few frames only. `dx, dy` comes from
+        # the bowling wrist's own velocity, which at release can point almost
+        # straight up; judging a whole arc against it rejects perfectly good
+        # flights. Over the arc's end the ball has also begun to fall, which drags
+        # the direction further away. Here it only has to not travel backwards.
+        head = chain[: min(len(chain), 8)]
+        move = (head[-1]["x"] - head[0]["x"], head[-1]["y"] - head[0]["y"])
         mag = float(np.hypot(move[0], move[1])) or 1.0
         align = (move[0] * dx + move[1] * dy) / mag
-        if align < 0.15:
+        if align < -0.20:
             continue
         sc = net * med_step * len(chain) * (0.4 + 0.6 * max(0.0, align))
         if sc > best_score:
@@ -511,21 +579,21 @@ def _ballistic_clean(path: list[dict[str, Any]], frame_w: int, frame_h: int) -> 
     xs = np.array([p["x"] for p in path], dtype=float)
     ys = np.array([p["y"] for p in path], dtype=float)
     try:
-        cx = np.polyfit(ts, xs, 1)
-        cy = np.polyfit(ts, ys, 2 if len(path) >= 6 else 1)
+        cx, cy, t0 = _fit_xy(ts, xs, ys)
     except Exception:
         return path
     tol = max(28.0, 0.018 * float(np.hypot(frame_w, frame_h)))
     kept = []
     for p in path:
-        d = float(np.hypot(p["x"] - np.polyval(cx, p["frame"]), p["y"] - np.polyval(cy, p["frame"])))
+        t = float(p["frame"]) - t0
+        d = float(np.hypot(p["x"] - np.polyval(cx, t), p["y"] - np.polyval(cy, t)))
         if d <= tol:
             kept.append(p)
     return kept if len(kept) >= 6 else path
 
 
-def _dark_centroid(bgr: np.ndarray, x: float, y: float, rad: float) -> tuple[float, float] | None:
-    """Sub-pixel centre of the dark blob around a lock — cuts per-frame jitter."""
+def _blob_centroid(bgr: np.ndarray, x: float, y: float, rad: float) -> tuple[float, float] | None:
+    """Sub-pixel centre of the locked blob — dark *or* white cricket ball."""
     h, w = bgr.shape[:2]
     r = int(max(8.0, rad))
     x0, y0 = max(0, int(x) - r), max(0, int(y) - r)
@@ -533,7 +601,12 @@ def _dark_centroid(bgr: np.ndarray, x: float, y: float, rad: float) -> tuple[flo
     if x1 - x0 < 8 or y1 - y0 < 8:
         return None
     gray = cv2.cvtColor(bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
-    _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # White leather is a bright disc; a red/dark ball is the opposite. Otsu-inv
+    # on a white ball walks the centroid onto a nearby shadow and kills the lock.
+    if float(np.mean(gray)) >= 140:
+        _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    else:
+        _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     m = cv2.moments(mask)
     if m["m00"] < 16:
         return None
@@ -555,7 +628,7 @@ def _refine_centroids(video_path, path: list[dict[str, Any]], frame_w: int, fram
         p = det.get(idx)
         if p is None:
             continue
-        hit = _dark_centroid(bgr, p["x"], p["y"], max(10.0, float(p.get("r") or 10) * 1.6))
+        hit = _blob_centroid(bgr, p["x"], p["y"], max(10.0, float(p.get("r") or 10) * 1.6))
         if hit is None:
             continue
         p["x"], p["y"] = float(hit[0]), float(hit[1])
@@ -598,8 +671,7 @@ def fill_every_frame(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
     xs = np.array([p["x"] for p in pts], dtype=float)
     ys = np.array([p["y"] for p in pts], dtype=float)
     try:
-        cx = np.polyfit(ts, xs, 1)
-        cy = np.polyfit(ts, ys, 2 if len(pts) >= 4 else 1)
+        cx, cy, t0 = _fit_xy(ts, xs, ys)
     except Exception:
         return pts
     filled = []
@@ -613,8 +685,8 @@ def fill_every_frame(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
         t = (f - f0) / max(1, f1 - f0)
         filled.append({
             "frame": f,
-            "x": float(np.polyval(cx, f)),
-            "y": float(np.polyval(cy, f)),
+            "x": float(np.polyval(cx, f - t0)),
+            "y": float(np.polyval(cy, f - t0)),
             "r": float(r0 * (1 - t) + r1 * t),
             "source": "interpolated",
         })
@@ -648,12 +720,25 @@ def annotate_frame_motion(
     return out
 
 
-def ballistic_release_speed_px_per_frame(ball_track: list[dict[str, Any]]) -> float | None:
-    """Release speed from a ballistic fit on detected in-air points.
+def ballistic_release_speed_px_per_frame(
+    ball_track: list[dict[str, Any]],
+    fps: float | None = None,
+) -> float | None:
+    """Image-plane speed of the ball *at the moment it leaves the hand*.
 
-    x(t) = x0 + vx·t, y(t) = y0 + vy·t + a·t². Instantaneous speed at the first
-    in-air sample is hypot(vx, dy/dt). This averages centroid jitter that
-    inflates per-frame distance ÷ time.
+    Two things make a naive fit under-read badly:
+
+    1. The ball recedes from the camera, so its pixel speed decays along the
+       flight — x(t) is not a straight line. Fitting x linearly over half the arc
+       and taking the median returns the mid-flight speed, not the release speed.
+       Here x and y are both fitted as quadratics and differentiated at the first
+       in-air sample.
+    2. The window must stay near release. We use the first ~0.12 s of flight,
+       where the ball is still close to the bowler's own depth plane.
+
+    The quadratic derivative at an endpoint is noise-sensitive, so it is bounded
+    against the raw early per-frame steps and falls back to their median if the
+    fit runs away.
     """
     pts = sorted(
         [p for p in ball_track if p.get("source") != "interpolated"],
@@ -663,27 +748,45 @@ def ballistic_release_speed_px_per_frame(ball_track: list[dict[str, Any]]) -> fl
         pts = sorted(ball_track, key=lambda p: p["frame"])
     if len(pts) < 5:
         return flight_release_speed_px_per_frame(ball_track)
+
     t0 = int(pts[0]["frame"])
-    # First half of the detected flight (min 8 frames) — closest to release.
-    early = [p for p in pts if int(p["frame"]) - t0 <= max(8, int(round((pts[-1]["frame"] - t0) * 0.45)))]
+    if fps and fps > 1:
+        span = max(6, int(round(float(fps) * 0.12)))
+        early = [p for p in pts if int(p["frame"]) - t0 <= span]
+    else:
+        early = []
+    if len(early) < 6:
+        early = pts[: max(6, min(12, len(pts)))]
     if len(early) < 5:
-        early = pts[: max(5, min(12, len(pts)))]
+        return flight_release_speed_px_per_frame(ball_track)
+
     ts = np.array([float(p["frame"]) for p in early], dtype=float)
     xs = np.array([float(p["x"]) for p in early], dtype=float)
     ys = np.array([float(p["y"]) for p in early], dtype=float)
     if ts[-1] <= ts[0]:
         return None
+
+    raw_steps = [
+        _dist(a, b) / max(1, int(b["frame"]) - int(a["frame"]))
+        for a, b in zip(early, early[1:])
+    ]
+    raw_med = float(np.median(raw_steps)) if raw_steps else None
+
+    deg = 2 if len(early) >= 6 else 1
     try:
-        cx = np.polyfit(ts, xs, 1)
-        cy = np.polyfit(ts, ys, 2 if len(early) >= 6 else 1)
+        cx = np.polyfit(ts - ts[0], xs, deg)
+        cy = np.polyfit(ts - ts[0], ys, deg)
     except Exception:
-        return None
-    vx = float(cx[0])
-    inst = []
-    for t in ts:
-        vy = float(2 * cy[0] * t + cy[1]) if len(cy) == 3 else float(cy[0])
-        inst.append(float(np.hypot(vx, vy)))
-    v = float(np.median(inst))
+        return raw_med if raw_med and raw_med > 0.4 else None
+
+    def _slope_at_zero(c: np.ndarray) -> float:
+        return float(c[-2]) if len(c) >= 2 else 0.0
+
+    v = float(np.hypot(_slope_at_zero(cx), _slope_at_zero(cy)))
+    if raw_med and raw_med > 0:
+        # An endpoint derivative can bolt; the raw early steps cannot.
+        if not (0.75 * raw_med <= v <= 1.35 * raw_med):
+            v = raw_med
     return v if v > 0.4 else None
 
 

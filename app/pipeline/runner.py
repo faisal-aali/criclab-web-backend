@@ -270,16 +270,26 @@ def _track_ball_seeded(
         if el is not None:
             elbow_dir = (float(wr[0] - el[0]), float(wr[1] - el[1]))
             throw_dir = elbow_dir
+        # Pitch direction (lead ankle − trail ankle) is where the ball actually
+        # goes. Elbow→wrist at cocking points at the sky and would filter the
+        # in-air white ball as "not downrange".
+        lead = "left" if side == "right" else "right"
+        la = pose_mod.point(rel, f"{lead}_ankle") if rel is not None else None
+        ta = pose_mod.point(rel, f"{side}_ankle") if rel is not None else None
+        if la is not None and ta is not None:
+            pitch = (float(la[0] - ta[0]), float(la[1] - ta[1]))
+            if float(np.hypot(pitch[0], pitch[1])) > 12:
+                throw_dir = (pitch[0], min(0.0, pitch[1]) * 0.35)
         prev = action_mod.frame_by_index(pose_track.get("frames") or [], int(release) - 4)
         if prev is not None:
             wr0 = pose_mod.point(prev, f"{side}_wrist")
             if wr0 is not None:
                 vel = (float(wr[0] - wr0[0]), float(wr[1] - wr0[1]))
                 # Wrist delta wins only if the hand is actually moving into the air
-                # (image Y decreases). Otherwise keep elbow→wrist.
-                if float(np.hypot(vel[0], vel[1])) > 8 and vel[1] < 4:
+                # (image Y decreases) *and* has a pitch-wise component.
+                if float(np.hypot(vel[0], vel[1])) > 8 and vel[1] < 4 and abs(vel[0]) > abs(vel[1]) * 0.35:
                     throw_dir = vel
-                elif elbow_dir is not None:
+                elif throw_dir is None and elbow_dir is not None:
                     throw_dir = elbow_dir
         fps = float(meta.get("fps") or pose_track.get("fps") or 30.0)
         return track.track_ball_from_release(
