@@ -65,3 +65,46 @@ the gaps were metric-definition bugs, overlay cadence, and PDF chart parity.
   (projection acceleration through the camera plane) → honest `—`. True trunk
   rotation needs multi-view (FEAT-016).
 - API contract unchanged; only additive metric keys. No frontend change needed.
+
+## Review pass (24 Aug 2026) — 10 findings, all addressed
+
+Multi-angle review of the branch (line-by-line, removed-behaviour, cross-file,
+reuse, simplification, efficiency, altitude) surfaced 10 findings; fixes:
+
+- **Stride-window fallback (correctness).** `_peak_in_window` silently widened
+  to the whole series when the window held <3 samples, so a "stride peak" could
+  come from the follow-through. Now returns `None` + an honest note when a
+  requested window is too thin, and the window is bounded **at** release (was
+  REL+0.05 s) — a hip peak after REL put sequence item 2 after item 4.
+  Confirmed live: hip now lands at 320 vs MER 323 vs REL 327.
+- **Spike-proof event frame.** Value was p95 but the exported frame was the raw
+  argmax, so a spike the percentile suppressed still became the event frame /
+  overlay freeze. Frame now comes from a median-of-3 of the magnitudes.
+- **Fabricated gap velocities.** `_angular_velocity` differentiated across runs
+  dropped by the degenerate-segment filter, inventing in-band values from an
+  arbitrary unwrap branch. Samples spanning >3× the median frame gap are now
+  skipped. This alone recovered the 120 fps trunk proxy: **182 deg/s (ok)**,
+  previously rejected at a fabricated 2024 deg/s, and sequencing now passes.
+- **Falsy-zero time base.** `(base_t or fr)` collapsed every `t_ms` to 0 when
+  FFC was frame 0. Now uses the `_t_ms` helper (single definition) everywhere.
+- **Series plausibility.** `rotation_series` samples outside the same bands that
+  gate the headline metrics become `None` (chart shows a gap via NaN) instead of
+  plotting a 3000 deg/s projection artifact as signal — one rule, one meaning.
+- **Resolution-dependent guard.** The hip/shoulder foreshortening test was a
+  hardcoded 12 px; now `max(8, 0.22 × torso length)`, so it holds at any framing.
+- **PDF truth.** Reason notes were pre-truncated to 39 chars upstream of the new
+  3-line wrap (cap raised to 84, wrap via `textwrap`); the separation tile pins
+  by |value| so a good negative separation no longer sits in the red zone while
+  the score ring shows green; `ffc_to_mer` gained the `arm_horizontal` fallback
+  `mer_to_rel` already had, so the two p6 rows agree on whether MER was seen.
+- **Mongo/API weight.** `rotation_series` is stripped before persisting — it only
+  feeds the PDF chart, and the history listing returns full metrics per row.
+- **Render decode cost.** Skipped frames are now `grab()`-ed rather than fully
+  decoded and colour-converted (~85% of frames on a 203 fps source).
+- Dead `win_frames` list removed; pose flicker-filter window widened to 9 with
+  its sustained-swap limitation documented (geometry alone cannot catch a swap
+  that dominates the window — appearance cues would be needed).
+
+Final state across fps paths: 203 fps ball 86.3 km/h, hip→MER→REL ordered;
+120 fps ball 78.4, hip 121 → trunk 182, sequencing True, gap 83 ms;
+30 fps hip 1082 → trunk 655, sequencing 100, ball honestly unavailable.

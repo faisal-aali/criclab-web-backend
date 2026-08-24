@@ -165,7 +165,7 @@ async def run_analysis_job(
             "meta": meta,
             "action": _strip_series(action),
             "release": {"frame": action.get("release_frame"), **(metrics.get("release_point") or {})},
-            "metrics": metrics,
+            "metrics": _strip_metric_series(metrics),
             "analysis": analysis,
             "render": render_info,
             "cloudinary": cloud,
@@ -201,6 +201,15 @@ def _strip_series(action: dict[str, Any]) -> dict[str, Any]:
     a = dict(action)
     a.pop("wrist_speed_series", None)
     return a
+
+
+def _strip_metric_series(metrics: dict[str, Any]) -> dict[str, Any]:
+    """rotation_series only feeds the PDF sequencing chart, which is already
+    built by now — hundreds of rows per 200 fps clip don't belong in every
+    history-listing response."""
+    m = dict(metrics)
+    m.pop("rotation_series", None)
+    return m
 
 
 def _track_ball_seeded(

@@ -160,6 +160,10 @@ def _drop_identity_flickers(
     trajectory; a swap to another person in frame is an instant jump of
     hundreds of pixels. Reject frames whose anchor sits far from the local
     median — never smooth or move landmarks, only drop the frame.
+
+    Limitation: this catches flickers up to ~4 samples. A sustained swap that
+    dominates the 9-sample window would win the median instead — appearance
+    cues (not just geometry) would be needed to catch that case.
     """
     if len(frames) < 9 or not width or not height:
         return frames, 0
@@ -171,7 +175,7 @@ def _drop_identity_flickers(
     drop: set[int] = set()
     idxs = [i for i, _ in valid]
     pts = np.array([a for _, a in valid], dtype=float)
-    half = 3
+    half = 4
     for j in range(len(valid)):
         lo = max(0, j - half)
         hi = min(len(valid), j + half + 1)

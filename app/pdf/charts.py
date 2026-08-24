@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")
 
@@ -94,6 +95,52 @@ def leg_trunk_chart(out_dir: Path, angle_series, events_ms=None) -> Path | None:
     )
 
 
+def _gapped_series(rows: list[dict[str, Any]], key: str) -> tuple[list[float], list[float]]:
+    """Like _series, but rejected samples become NaN so the line breaks there.
+
+    Dropping them instead would draw a straight line straight through the
+    stretch we refused to measure.
+    """
+    xs, ys = [], []
+    for row in rows:
+        if row.get("t_ms") is None:
+            continue
+        xs.append(float(row["t_ms"]))
+        v = row.get(key)
+        ys.append(float("nan") if v is None else float(v))
+    return xs, ys
+
+
+def _sequencing_ylim(rotation_series, events_ms) -> tuple[float, float] | None:
+    """Y-range that frames the FFC→release stretch, ignoring follow-through spikes.
+
+    Returns None when nothing would be cut off (no need to bound the view).
+    """
+    keys = ("hip_deg_s", "trunk_deg_s", "arm_deg_s")
+    t_end = (events_ms or {}).get("release")
+    t_start = (events_ms or {}).get("front_foot_contact")
+    inside, every = [], []
+    for row in rotation_series:
+        t = row.get("t_ms")
+        vals = [abs(float(row[k])) for k in keys if row.get(k) is not None]
+        if not vals:
+            continue
+        every.extend(vals)
+        if t is None or t_end is None:
+            continue
+        if (t_start is None or float(t) >= float(t_start) - 120.0) and float(t) <= float(t_end) + 40.0:
+            inside.extend(vals)
+    if not every:
+        return None
+    span = max(inside) if inside else float(np.percentile(every, 90))
+    if span <= 0:
+        return None
+    limit = float(min(3000.0, max(300.0, span * 1.35)))
+    if max(every) <= limit:
+        return None
+    return (-limit, limit)
+
+
 def sequencing_chart(out_dir: Path, rotation_series, events_ms=None) -> Path | None:
     """SpinLab page-2 signature chart: hip / trunk / arm angular speed + events."""
     specs = [
@@ -104,8 +151,8 @@ def sequencing_chart(out_dir: Path, rotation_series, events_ms=None) -> Path | N
     fig, ax = plt.subplots(figsize=(7.2, 2.7), dpi=150)
     plotted = False
     for key, label, color, style in specs:
-        xs, ys = _series(rotation_series or [], key)
-        if len(xs) >= 3:
+        xs, ys = _gapped_series(rotation_series or [], key)
+        if sum(1 for y in ys if y == y) >= 3:  # NaN != NaN
             ax.plot(xs, ys, label=label, color=color, linestyle=style, linewidth=2.0)
             plotted = True
     if not plotted:
@@ -113,6 +160,18 @@ def sequencing_chart(out_dir: Path, rotation_series, events_ms=None) -> Path | N
         return None
     _draw_event_lines(ax, events_ms)
     ax.axhline(0, color=GRID, linewidth=0.8)
+
+    # Follow-through projection artifacts (the body rotating through the camera
+    # plane) can spike to thousands of deg/s and squash the delivery signal to a
+    # flat line. Frame the view on the delivery, and say so — the samples are
+    # still plotted, only the viewport is bounded.
+    ylim = _sequencing_ylim(rotation_series or [], events_ms)
+    if ylim is not None:
+        ax.set_ylim(ylim)
+        ax.text(0.995, 0.03, "view bounded to the delivery — spikes continue off-chart",
+                transform=ax.transAxes, ha="right", va="bottom",
+                fontsize=6.5, color="#777777")
+
     ax.set_title("Kinematics sequencing — angular speed (image plane)",
                  color=PITCH, fontsize=12, fontweight="bold", loc="left")
     ax.set_xlabel("Time from front-foot contact (ms)", fontsize=9)

@@ -236,8 +236,10 @@ def render_overlay_video(
     frames_written = 0
     emit_acc = 0.0
     while True:
-        ok, frame = cap.read()
-        if not ok:
+        # Decide from idx alone before decoding — skipped frames are only
+        # grab()bed (packet advance), never colour-converted, which matters
+        # when a 200 fps source maps to 30 fps output.
+        if not cap.grab():
             break
 
         in_window = (
@@ -259,6 +261,11 @@ def render_overlay_video(
             and idx >= release_frame
         )
         if reps <= 0 and not need_still:
+            idx += 1
+            continue
+
+        ok, frame = cap.retrieve()
+        if not ok:
             idx += 1
             continue
 

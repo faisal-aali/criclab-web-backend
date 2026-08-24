@@ -12,6 +12,7 @@ Pages:
 
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -68,8 +69,10 @@ def _ok_val(metrics: dict[str, Any], key: str):
 def _tile_value(metrics: dict[str, Any], key: str):
     m = metrics.get(key) or {}
     if m.get("status") != "ok" or m.get("value") is None:
+        # _tile word-wraps up to 3 lines (~24 chars each) — don't pre-truncate
+        # the honest reason below what the tile can actually show.
         note = m.get("note") or "Unavailable"
-        short = note if len(note) <= 42 else note[:39] + "…"
+        short = note if len(note) <= 84 else note[:81] + "…"
         return None, short
     return m.get("value"), None
 
@@ -82,6 +85,10 @@ BAND_GREEN = colors.HexColor("#16A34A")
 # instead of "higher is better".
 CENTERED_BAND_KEYS = {"stride_length_pct_height", "release_angle_deg"}
 
+# Metrics whose band is about magnitude — a signed value pins by |value| so a
+# good negative separation doesn't land in the red zone the score contradicts.
+ABS_BAND_KEYS = {"hip_shoulder_separation_deg"}
+
 
 def _fmt_tile_value(value, unit: str) -> str:
     if unit == "m":
@@ -90,7 +97,7 @@ def _fmt_tile_value(value, unit: str) -> str:
 
 
 def _tile(label: str, value, unit: str, lo: float, hi: float,
-          reason: str | None = None, centered: bool = False) -> Drawing:
+          reason: str | None = None, centered: bool = False, pin_abs: bool = False) -> Drawing:
     w, h = 116, 86
     d = Drawing(w, h)
     d.add(Rect(0, 0, w, h, rx=8, ry=8, fillColor=MIST, strokeColor=LINE, strokeWidth=0.7))
@@ -98,17 +105,7 @@ def _tile(label: str, value, unit: str, lo: float, hi: float,
     if value is None:
         d.add(String(10, h - 40, "—", fontName="Helvetica-Bold", fontSize=22, fillColor=GREY))
         if reason:
-            lines: list[str] = [""]
-            for word in reason.split():
-                cand = (lines[-1] + " " + word).strip()
-                if len(cand) <= 24 or not lines[-1]:
-                    lines[-1] = cand
-                else:
-                    lines.append(word)
-                if len(lines) > 3:
-                    lines = lines[:3]
-                    lines[-1] += "…"
-                    break
+            lines = textwrap.wrap(reason, width=24, max_lines=3, placeholder="…")
             for i, ln in enumerate(lines):
                 d.add(String(10, h - 56 - 9 * i, ln, fontName="Helvetica", fontSize=5.5, fillColor=GREY))
     else:
@@ -125,7 +122,8 @@ def _tile(label: str, value, unit: str, lo: float, hi: float,
             d.add(Rect(bx + z0 * bw, by, (z1 - z0) * bw, bh, fillColor=zc,
                        strokeColor=None, strokeWidth=0))
         if hi > lo:
-            t = max(0.0, min(1.0, (float(value) - lo) / (hi - lo)))
+            pv = abs(float(value)) if pin_abs else float(value)
+            t = max(0.0, min(1.0, (pv - lo) / (hi - lo)))
             mx = bx + t * bw
             d.add(Rect(mx - 1.6, by - 2, 3.2, bh + 4, rx=1.4, ry=1.4,
                        fillColor=colors.white, strokeColor=PITCH, strokeWidth=0.9))
@@ -231,7 +229,8 @@ def _tile_row(metrics: dict[str, Any], items: list[tuple[str, str]]) -> Table:
         lo, hi, unit = BANDS.get(key, (0, 100, ""))
         value, reason = _tile_value(metrics, key)
         cells.append(_tile(label, value, unit, lo, hi, reason=reason,
-                           centered=key in CENTERED_BAND_KEYS))
+                           centered=key in CENTERED_BAND_KEYS,
+                           pin_abs=key in ABS_BAND_KEYS))
     while len(cells) < 4:
         cells.append("")
     t = Table([cells], colWidths=[122] * 4, hAlign="LEFT")
@@ -479,6 +478,10 @@ def build_pdf(
         mer_to_rel = _dt_ms(phases, "arm_horizontal", "release", fps)
     hip_to_rel = _dt_ms(phases, "hip_rotation", "release", fps)
     ffc_to_mer = _dt_ms(phases, "front_foot_contact", "max_external_rotation", fps)
+    if ffc_to_mer is None:
+        # Same arm_horizontal fallback mer_to_rel uses — the two rows must agree
+        # on whether MER was seen.
+        ffc_to_mer = _dt_ms(phases, "front_foot_contact", "arm_horizontal", fps)
 
     story.append(Paragraph("STRIDE STEP", st["h2"]))
     stride_tbl = Table([

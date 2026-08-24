@@ -186,10 +186,13 @@ def _joint_angles(frame: dict[str, Any] | None, side: str) -> dict[str, float | 
     sep = None
     sh_line = posemod.segment_angle_deg(rsh, lsh)
     hip_line = posemod.segment_angle_deg(rhip, lhip)
-    # Foreshortened lines (pointing at the camera) give meaningless angles.
+    # Foreshortened lines (pointing at the camera) give meaningless angles —
+    # scale the guard by torso length so it holds at any resolution/framing.
     sh_len = float(np.linalg.norm(lsh - rsh)) if lsh is not None and rsh is not None else 0.0
     hip_len = float(np.linalg.norm(lhip - rhip)) if lhip is not None and rhip is not None else 0.0
-    if sh_line is not None and hip_line is not None and sh_len >= 12 and hip_len >= 12:
+    torso_len = float(np.linalg.norm(mid_sh - mid_hip)) if mid_sh is not None and mid_hip is not None else 0.0
+    min_line = max(8.0, 0.22 * torso_len)
+    if sh_line is not None and hip_line is not None and sh_len >= min_line and hip_len >= min_line:
         sep = round(((sh_line - hip_line + 180) % 360) - 180, 1)
 
     bowling_arm = posemod.segment_angle_deg(sh, wr)
@@ -300,9 +303,15 @@ def _angular_velocity(idxs, angs, fps, smooth_win: int = 0):
     unwrapped = np.degrees(np.unwrap(np.radians(angs)))
     if smooth_win:
         unwrapped = np.array(_moving_avg(list(unwrapped), smooth_win))
+    # A sample that bridges a dropped run (degenerate-segment filter, missed
+    # pose) would be fiction — the unwrap branch across the gap is arbitrary.
+    dfs = [max(1, int(idxs[i]) - int(idxs[i - 1])) for i in range(1, len(idxs))]
+    max_df = max(3.0, 3.0 * float(np.median(dfs))) if dfs else 3.0
     vel, vidx = [], []
     for i in range(1, len(unwrapped)):
         df = max(1, idxs[i] - idxs[i - 1])
+        if df > max_df:
+            continue
         vel.append((unwrapped[i] - unwrapped[i - 1]) / df * fps)
         vidx.append(idxs[i])
     return vidx, vel
@@ -329,23 +338,31 @@ def _peak_in_window(
 
     Hip and trunk rotation peak *before* release in a well-sequenced action
     (hip → torso → arm), so a near-release sample misses the real peak.
-    95th percentile kills a single-sample spike; the frame is the argmax.
+    95th percentile kills a single-sample spike for the *value*; the *frame*
+    comes from a median-of-3 of the magnitudes so that same spike cannot
+    become the event frame either. Too few samples inside a requested window
+    → None (never silently widen to the whole series — the "stride peak"
+    would come from the run-up or follow-through).
     """
     if not vel:
         return None, None, None
+    windowed = start_f is not None or end_f is not None
     pairs = [
         (int(i), float(v))
         for i, v in zip(vidx, vel)
         if (start_f is None or int(i) >= int(start_f)) and (end_f is None or int(i) <= int(end_f))
     ]
     if len(pairs) < 3:
+        if windowed:
+            return None, None, None
         pairs = [(int(i), float(v)) for i, v in zip(vidx, vel)]
-    if not pairs:
+    if len(pairs) < 3:
         return None, None, None
     mags = [abs(v) for _, v in pairs]
-    peak_fr = pairs[int(np.argmax(mags))][0]
+    med3 = [float(np.median(mags[max(0, i - 1): i + 2])) for i in range(len(mags))]
+    peak_fr = pairs[int(np.argmax(med3))][0]
     raw = float(np.percentile(mags, 95))
-    return round(raw, 0), raw, peak_fr
+    return round(raw, 0), raw, int(peak_fr)
 
 
 def _smooth_series_column(rows: list[dict[str, Any]], key: str, win: int) -> None:
@@ -602,10 +619,6 @@ def compute_metrics(
 
     win = action.get("delivery_window") or {}
     w_start, w_end = win.get("start"), win.get("end")
-    win_frames = [
-        f for f in frames
-        if (w_start is None or f["frame"] >= w_start) and (w_end is None or f["frame"] <= w_end)
-    ]
 
     # Chart/series span: the wrist-speed window starts after FFC, but the charts
     # must show the whole delivery (BFC → follow-through) like SpinLab's.
@@ -652,9 +665,12 @@ def compute_metrics(
         rot_start = int(rot_start) - max(2, int(round(fps * 0.10)))
     elif w_start is not None:
         rot_start = int(w_start)
+    # Bounded AT release: hip and trunk lead the arm in the chain, so a "peak"
+    # in the follow-through is not a stride peak — it would put sequence item 2
+    # after item 4 on the overlay and print a negative hip→REL split.
     rot_end = None
     if release_frame is not None:
-        rot_end = int(release_frame) + max(1, int(round(fps * 0.05)))
+        rot_end = int(release_frame)
     elif w_end is not None:
         rot_end = int(w_end)
     hip_rot, hip_raw, hip_peak_fr = _peak_in_window(hip_vidx, hip_vel, rot_start, rot_end)
@@ -666,12 +682,16 @@ def compute_metrics(
         hip_peak_fr = None
     elif hip_rot is not None:
         hip_note = "Peak 2D pelvis-line speed during the delivery stride — not true 3D hip rotation"
+    else:
+        hip_note = "Too few clean pelvis-line samples in the stride window — hip line foreshortened from this angle"
     if trunk_rot is not None and (trunk_rot > 1200 or trunk_rot < 20):
         trunk_note = f"Computed {trunk_rot:.0f} deg/s is outside a realistic 2D shoulder-line band — not reported"
         trunk_rot = None
         trunk_peak_fr = None
     elif trunk_rot is not None:
         trunk_note = "Peak 2D shoulder-line speed during the delivery stride — not true 3D trunk rotation"
+    else:
+        trunk_note = "Too few clean shoulder-line samples in the stride window — shoulders foreshortened from this angle"
 
     # The hip-rotation event everywhere (overlay disc, timeline, stills, PDF)
     # is the measured hip peak — the same frame as the reported deg/s.
@@ -743,16 +763,23 @@ def compute_metrics(
         front_knee = rel_angles.get("front_knee_flexion")
         knee_note = "Front-leg angle at release (180° = straight)" if front_knee is not None else "Front knee not visible"
 
-    angle_series: list[dict[str, Any]] = []
     base_t = phases.get("front_foot_contact")
     if base_t is None:
         base_t = w_start
+
+    def _t_ms(fr: int | None) -> float | None:
+        # base_t == 0 is a valid base frame — compare with None, never truthiness.
+        if fr is None or base_t is None:
+            return None
+        return round((int(fr) - int(base_t)) / max(fps, 1e-6) * 1000.0, 1)
+
+    angle_series: list[dict[str, Any]] = []
     for f in series_frames:
         fr = int(f["frame"])
         a = _joint_angles(f, side or "right")
         angle_series.append({
             "frame": fr,
-            "t_ms": round((fr - (base_t or fr)) / max(fps, 1e-6) * 1000.0, 1) if base_t is not None else None,
+            "t_ms": _t_ms(fr),
             "elbow_extension": a["elbow_extension"],
             "shoulder_abduction": a["shoulder_abduction"],
             "trunk_flexion": a["trunk_flexion"],
@@ -763,12 +790,14 @@ def compute_metrics(
     for col in ("elbow_extension", "shoulder_abduction", "trunk_flexion", "front_knee_flexion"):
         _smooth_series_column(angle_series, col, ang_smooth)
 
-    def _t_ms(fr: int | None) -> float | None:
-        if fr is None or base_t is None:
-            return None
-        return round((int(fr) - int(base_t)) / max(fps, 1e-6) * 1000.0, 1)
-
     # Rotation-speed series for the SpinLab-style sequencing chart (page 2).
+    # Per-sample plausibility uses the SAME bands that gate the headline
+    # metrics: a 3000 deg/s "pelvis line" in the follow-through is projection
+    # collapse, and plotting it as signal would contradict the number we
+    # refused to report. Out-of-band samples become None (a gap), never clamped.
+    def _in_band(v: float, cap: float) -> float | None:
+        return round(float(v), 1) if abs(float(v)) <= cap else None
+
     hip_v_by_f = {int(i): float(v) for i, v in zip(hip_vidx, hip_vel)}
     sh_v_by_f = {int(i): float(v) for i, v in zip(sh_vidx, sh_vel)}
     arm_v_by_f = {int(i): float(v) for i, v in zip(arm_vidx, arm_vel)}
@@ -777,9 +806,9 @@ def compute_metrics(
         rotation_series.append({
             "frame": fr,
             "t_ms": _t_ms(fr),
-            "hip_deg_s": None if fr not in hip_v_by_f else round(hip_v_by_f[fr], 1),
-            "trunk_deg_s": None if fr not in sh_v_by_f else round(sh_v_by_f[fr], 1),
-            "arm_deg_s": None if fr not in arm_v_by_f else round(arm_v_by_f[fr], 1),
+            "hip_deg_s": None if fr not in hip_v_by_f else _in_band(hip_v_by_f[fr], 1200.0),
+            "trunk_deg_s": None if fr not in sh_v_by_f else _in_band(sh_v_by_f[fr], 1200.0),
+            "arm_deg_s": None if fr not in arm_v_by_f else _in_band(arm_v_by_f[fr], 4000.0),
         })
 
     event_t_ms = {
@@ -994,7 +1023,7 @@ def compute_metrics(
                 f"Computed {rel_angles.get('hip_shoulder_separation'):.0f}° is projection collapse "
                 "from this camera angle — not reported"
                 if rel_angles.get("hip_shoulder_separation") is not None
-                else "Not visible at release"
+                else "Shoulder or hip line not measurable at release — not visible, or pointing at the camera"
             ),
             estimated=True,
             status="ok" if sep is not None else "unavailable",
