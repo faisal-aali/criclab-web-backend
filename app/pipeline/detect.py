@@ -13,7 +13,12 @@ from typing import Any
 import cv2
 import numpy as np
 
-from app.pipeline.cv_vision import enhance_bgr
+from app.pipeline.cv_vision import enhance_bgr, hough_ball_candidates
+
+# Blob finders were tuned on 720–1080p. On 4K, a 15 px DoG and a 4 px min-radius
+# light up poster lettering and net sparkle, and CLAHE on 8 Mpx is too slow to
+# finish a delivery scan. Detect at this cap and map coordinates back.
+DETECT_MAX_SIDE = 1920
 
 
 def make_background_subtractor() -> Any:
@@ -88,6 +93,75 @@ def detect_ball_candidates(
     return cands[:max_candidates]
 
 
+def working_view(bgr: np.ndarray, max_side: int = DETECT_MAX_SIDE) -> tuple[np.ndarray, float, float]:
+    """Downscale a 4K (or similar) frame to the detection working size.
+
+    Returns `(frame, sx, sy)` mapping working-frame pixels → original
+    (`x_orig = x_work * sx`). Both scales are `1.0` when the frame is already
+    small enough.
+    """
+    h, w = bgr.shape[:2]
+    side = max(h, w)
+    if side <= max_side:
+        return bgr, 1.0, 1.0
+    scale = max_side / float(side)
+    nw = max(2, int(round(w * scale)) & ~1)
+    nh = max(2, int(round(h * scale)) & ~1)
+    work = cv2.resize(bgr, (nw, nh), interpolation=cv2.INTER_AREA)
+    return work, w / float(nw), h / float(nh)
+
+
+def _scale_candidates(cands: list[dict[str, Any]], sx: float, sy: float) -> list[dict[str, Any]]:
+    if sx == 1.0 and sy == 1.0:
+        return cands
+    sm = (sx + sy) * 0.5
+    out: list[dict[str, Any]] = []
+    for c in cands:
+        d = dict(c)
+        d["x"] = float(c["x"]) * sx
+        d["y"] = float(c["y"]) * sy
+        d["r"] = float(c.get("r") or 0) * sm
+        out.append(d)
+    return out
+
+
+def collect_flight_candidates(
+    bgr: np.ndarray,
+    prev_work_gray: np.ndarray | None = None,
+) -> tuple[list[dict[str, Any]], np.ndarray]:
+    """All ball hypotheses for one frame, in *original* pixel coordinates.
+
+    Detection runs on a ≤1920 working copy so 4K night posters do not drown a
+    motion-blurred cricket ball. The gray returned is that working copy, to be
+    passed back as `prev_work_gray` on the next frame.
+    """
+    work, sx, sy = working_view(bgr)
+    enhanced = enhance_bgr(work)
+    gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+    dark = detect_dark_flight_candidates(enhanced, enhance=False)
+    color = detect_ball_color_candidates(enhanced, enhance=False)
+    bright = detect_bright_flight_candidates(enhanced, enhance=False)
+    motion: list[dict[str, Any]] = []
+    fast: list[dict[str, Any]] = []
+    if prev_work_gray is not None:
+        cricket_r = min(gray.shape[:2]) * 0.028
+        motion = detect_ball_motion_candidates(prev_work_gray, gray)
+        fast = detect_ball_motion_candidates(
+            prev_work_gray, gray, threshold=36, max_r_frac=0.038
+        )
+        for c in motion + fast:
+            c["source"] = "motion"
+            r = float(c.get("r") or 0)
+            # Tiny movers are the 4K/120fps ball; huge body/poster blobs are not.
+            if r <= cricket_r * 1.35:
+                c["score"] = float(c.get("score") or 0) + 4.0
+            else:
+                c["score"] = float(c.get("score") or 0) + 0.4
+    hough = hough_ball_candidates(enhanced, enhance=False)
+    merged = merge_ball_candidates(dark, color, bright, motion, fast, hough)
+    return _scale_candidates(merged, sx, sy), gray
+
+
 def _blob_candidates(
     mask: np.ndarray,
     origin_xy: tuple[int, int] = (0, 0),
@@ -104,19 +178,32 @@ def _blob_candidates(
     cands: list[dict[str, Any]] = []
     for c in contours:
         area = cv2.contourArea(c)
-        if area < 8:
+        if area < 4:
             continue
         (cx, cy), radius = cv2.minEnclosingCircle(c)
         if radius < min_r or radius > max_r:
             continue
         circularity = area / (np.pi * radius * radius + 1e-6)
-        # Motion-blurred cricket/football is oval — keep elongated blobs.
-        if circularity < 0.12:
+        bx, by, bw, bh = cv2.boundingRect(c)
+        thin = float(min(bw, bh))
+        long = float(max(bw, bh))
+        aspect = long / max(thin, 1.0)
+        # A 120 fps white ball is a streak, not a disc. Keep elongated blobs that
+        # are still cricket-ball-thin; drop shapeless poster patches.
+        streak = (
+            aspect >= 2.2
+            and thin <= cricket_r * 1.6
+            and long <= min(w, h) * 0.14
+            and circularity >= 0.06
+        )
+        if circularity < 0.12 and not streak:
             continue
         # Size-favoring score keeps large training ovals; compact score keeps a
         # 4–16 px cricket ball that posters and floodlight flares would drown.
         size_score = float(radius * (0.25 + circularity))
         compact_score = float(circularity * (1.2 + cricket_r / max(radius, 2.0)))
+        if streak:
+            compact_score = max(compact_score, 1.4 + thin / max(cricket_r, 1.0))
         cands.append({
             "x": float(cx + ox),
             "y": float(cy + oy),
@@ -124,13 +211,14 @@ def _blob_candidates(
             "score": max(size_score, compact_score),
             "size_score": size_score,
             "compact_score": compact_score,
+            "streak": streak,
         })
     if not cands:
         return []
     keep: dict[tuple[int, int], dict[str, Any]] = {}
     by_size = sorted(cands, key=lambda d: d["size_score"], reverse=True)
     by_compact = sorted(
-        [c for c in cands if c["r"] <= cricket_r * 1.35],
+        [c for c in cands if c["r"] <= cricket_r * 1.35 or c.get("streak")],
         key=lambda d: d["compact_score"],
         reverse=True,
     )
@@ -141,29 +229,34 @@ def _blob_candidates(
     return list(keep.values())[: max_candidates]
 
 
-def detect_dark_flight_candidates(bgr: np.ndarray, *, mask_ground: bool = True) -> list[dict[str, Any]]:
+def detect_dark_flight_candidates(
+    bgr: np.ndarray, *, mask_ground: bool = True, enhance: bool = True
+) -> list[dict[str, Any]]:
     """Dark ball against sky/background (red cricket ball or dark football)."""
-    bgr = enhance_bgr(bgr)
+    if enhance:
+        bgr = enhance_bgr(bgr)
     h, w = bgr.shape[:2]
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     dark = ((hsv[:, :, 2] < 125) & (gray < 135)).astype(np.uint8) * 255
-    # Ignore the turf on full frames — the ball we care about is in flight.
+    # Turf only — track.py still does the hand-relative cut. 0.62 of a 4K
+    # frame (or a 1080p bowler in the lower half) deleted the in-air ball.
     if mask_ground and h >= 400:
-        dark[int(h * 0.62) :, :] = 0
+        dark[int(h * 0.88) :, :] = 0
     kernel = np.ones((3, 3), np.uint8)
     dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, kernel, iterations=1)
     return _blob_candidates(dark, max_candidates=24)
 
 
-def detect_ball_color_candidates(bgr: np.ndarray) -> list[dict[str, Any]]:
+def detect_ball_color_candidates(bgr: np.ndarray, *, enhance: bool = True) -> list[dict[str, Any]]:
     """Red or white cricket-ball coloured blobs.
 
     White leather is often V~150–180 (not a clipped 185 highlight), and floodlight
     flares / posters are huge — cap radius at cricket-ball scale so they cannot
     crowd the candidate list. Dark training ovals still come from the dark detector.
     """
-    bgr = enhance_bgr(bgr)
+    if enhance:
+        bgr = enhance_bgr(bgr)
     h, w = bgr.shape[:2]
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     red = cv2.bitwise_or(
@@ -180,37 +273,54 @@ def detect_ball_color_candidates(bgr: np.ndarray) -> list[dict[str, Any]]:
     return _blob_candidates(mask, max_r_frac=0.038)
 
 
-def detect_bright_flight_candidates(bgr: np.ndarray, *, mask_edges: bool = True) -> list[dict[str, Any]]:
+def detect_bright_flight_candidates(
+    bgr: np.ndarray, *, mask_edges: bool = True, enhance: bool = True
+) -> list[dict[str, Any]]:
     """White cricket ball as a small local brightness peak (night turf / grey wall).
 
     HSV-white alone matches shoes, stumps and poster lettering. A ball in flight
     is also brighter than its immediate surround — DoG keeps those discs and
     drops extended glare.
     """
-    bgr = enhance_bgr(bgr)
+    if enhance:
+        bgr = enhance_bgr(bgr)
     h, w = bgr.shape[:2]
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     white = cv2.inRange(hsv, (0, 0, 145), (180, 90, 255))
-    surround = cv2.GaussianBlur(gray, (15, 15), 0)
+    k = int(round(min(h, w) * 0.014))
+    if k % 2 == 0:
+        k += 1
+    k = int(np.clip(k, 9, 31))
+    surround = cv2.GaussianBlur(gray, (k, k), 0)
     peak = cv2.subtract(gray, surround)
     _, peak_m = cv2.threshold(peak, 10, 255, cv2.THRESH_BINARY)
     mask = cv2.bitwise_and(white, peak_m)
     if mask_edges and h >= 400:
         mask[: int(h * 0.08), :] = 0
-        mask[int(h * 0.78) :, :] = 0  # turf / planted white ball from a previous delivery
+        mask[int(h * 0.90) :, :] = 0  # planted white ball from a previous delivery
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
     return _blob_candidates(mask, max_candidates=16, max_r_frac=0.032)
 
 
-def detect_ball_motion_candidates(prev_gray: np.ndarray, gray: np.ndarray) -> list[dict[str, Any]]:
-    """Small moving blobs from frame-to-frame difference."""
+def detect_ball_motion_candidates(
+    prev_gray: np.ndarray,
+    gray: np.ndarray,
+    *,
+    threshold: int = 22,
+    max_r_frac: float = 0.045,
+) -> list[dict[str, Any]]:
+    """Small moving blobs from frame-to-frame difference.
+
+    Cap radius so the bowler silhouette cannot occupy the whole candidate list
+    and hide a 4–8 px cricket ball.
+    """
     diff = cv2.absdiff(gray, prev_gray)
-    _, mask = cv2.threshold(diff, 22, 255, cv2.THRESH_BINARY)
+    _, mask = cv2.threshold(diff, int(threshold), 255, cv2.THRESH_BINARY)
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-    return _blob_candidates(mask)
+    return _blob_candidates(mask, max_candidates=32, max_r_frac=max_r_frac)
 
 
 def detect_ball_in_roi(
@@ -258,26 +368,65 @@ def merge_ball_candidates(
     *groups: list[dict[str, Any]],
     merge_px: float = 8.0,
     per_group: int = 12,
-    total: int = 40,
+    total: int = 48,
+    compact_r: float = 22.0,
 ) -> list[dict[str, Any]]:
     """Spatial merge with a per-source quota.
 
     Colour posters score higher than a 6 px white ball (radius-weighted). Taking
     the global top-N therefore dropped the ball. Each detector keeps its own
-    best hits, then we collapse duplicates.
+    best hits *and* its compact/streak hits, then we collapse duplicates.
     """
     merged: list[dict[str, Any]] = []
+
+    def _absorb(c: dict[str, Any]) -> None:
+        hit = None
+        for m in merged:
+            if np.hypot(c["x"] - m["x"], c["y"] - m["y"]) <= merge_px:
+                hit = m
+                break
+        if hit is None:
+            merged.append(dict(c))
+            return
+        # A later compact/motion hit is the cricket ball; keep its centroid,
+        # not the first poster sparkle that happened to sit 8 px away.
+        c_compact = float(c.get("compact_score") or 0)
+        h_compact = float(hit.get("compact_score") or 0)
+        prefer = c.get("source") == "motion" and hit.get("source") != "motion"
+        if prefer or c_compact > h_compact:
+            hit["x"] = float(c["x"])
+            hit["y"] = float(c["y"])
+            hit["r"] = float(c.get("r") or hit.get("r") or 0)
+            if c.get("source"):
+                hit["source"] = c["source"]
+            if c_compact:
+                hit["compact_score"] = c_compact
+        hit["score"] = max(float(hit.get("score") or 0), float(c.get("score") or 0))
+        if c.get("streak"):
+            hit["streak"] = True
+
     for group in groups:
         ranked = sorted(group, key=lambda d: d.get("score") or 0, reverse=True)[:per_group]
-        for c in ranked:
-            hit = None
-            for m in merged:
-                if np.hypot(c["x"] - m["x"], c["y"] - m["y"]) <= merge_px:
-                    hit = m
-                    break
-            if hit is None:
-                merged.append(dict(c))
-            else:
-                hit["score"] = max(float(hit.get("score") or 0), float(c.get("score") or 0))
-    merged.sort(key=lambda d: d.get("score") or 0, reverse=True)
-    return merged[:total]
+        compact = sorted(
+            [c for c in group if float(c.get("r") or 0) <= compact_r],
+            key=lambda d: d.get("compact_score") or d.get("score") or 0,
+            reverse=True,
+        )[:per_group]
+        for c in ranked + compact:
+            _absorb(c)
+    compact_kept = [m for m in merged if float(m.get("r") or 0) <= compact_r]
+    bulky = [m for m in merged if float(m.get("r") or 0) > compact_r]
+    bulky.sort(key=lambda d: d.get("score") or 0, reverse=True)
+    motion_c = [m for m in compact_kept if m.get("source") == "motion"]
+    other_c = [m for m in compact_kept if m.get("source") != "motion"]
+    # r<4 is net sparkle on 1080p *and* the 4K/120fps motion speck. Keep a
+    # few of the specks; do not let them occupy every compact slot.
+    tiny_m = [m for m in motion_c if float(m.get("r") or 0) < 4.0]
+    rest_m = [m for m in motion_c if float(m.get("r") or 0) >= 4.0]
+    other_mid = [m for m in other_c if float(m.get("r") or 0) >= 5.0]
+    tiny_m.sort(key=lambda d: d.get("compact_score") or d.get("score") or 0, reverse=True)
+    rest_m.sort(key=lambda d: d.get("score") or 0, reverse=True)
+    other_mid.sort(key=lambda d: d.get("score") or 0, reverse=True)
+    compact_out = rest_m[:10] + tiny_m[:8] + other_mid[:10]
+    n_b = max(0, total - len(compact_out))
+    return compact_out + bulky[:n_b]

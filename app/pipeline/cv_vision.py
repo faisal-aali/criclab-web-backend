@@ -30,13 +30,29 @@ def gray_for_flow(bgr: np.ndarray) -> np.ndarray:
     return cv2.GaussianBlur(g, (5, 5), 0)
 
 
-def hough_ball_candidates(bgr: np.ndarray, max_candidates: int = 8) -> list[dict[str, Any]]:
+def _flow_working(gray: np.ndarray, max_side: int = 1920) -> tuple[np.ndarray, float, float]:
+    """Downscale 4K grays so Lucas–Kanade's 21×21 window still covers the blob."""
+    h, w = gray.shape[:2]
+    side = max(h, w)
+    if side <= max_side:
+        return gray, 1.0, 1.0
+    s = max_side / float(side)
+    nw = max(2, int(round(w * s)) & ~1)
+    nh = max(2, int(round(h * s)) & ~1)
+    work = cv2.resize(gray, (nw, nh), interpolation=cv2.INTER_AREA)
+    return work, nw / float(w), nh / float(h)
+
+
+def hough_ball_candidates(
+    bgr: np.ndarray, max_candidates: int = 8, *, enhance: bool = True
+) -> list[dict[str, Any]]:
     """Extra circular hypotheses via Hough gradient (cricket ball ≈ circle).
 
     Motion-blurred balls often fail this test — contours/MOG2 still lead.
     """
     h, w = bgr.shape[:2]
-    gray = cv2.cvtColor(enhance_bgr(bgr), cv2.COLOR_BGR2GRAY)
+    src = enhance_bgr(bgr) if enhance else bgr
+    gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
     gray = cv2.medianBlur(gray, 5)
     min_r = max(3, int(min(w, h) * 0.004))
     max_r = max(min_r + 2, int(min(w, h) * 0.045))
@@ -148,7 +164,7 @@ def validate_ball_path_on_video(
             if idx < start:
                 idx += 1
                 continue
-            gray = gray_for_flow(bgr)
+            gray, sx, sy = _flow_working(gray_for_flow(bgr))
             if (
                 prev_gray is not None
                 and prev_idx is not None
@@ -157,12 +173,17 @@ def validate_ball_path_on_video(
             ):
                 a = by_fr[prev_idx]
                 b = by_fr[idx]
-                expected = np.array([b["x"] - a["x"], b["y"] - a["y"]], dtype=np.float32)
+                expected = np.array(
+                    [(b["x"] - a["x"]) * sx, (b["y"] - a["y"]) * sy], dtype=np.float32
+                )
                 exp_mag = float(np.linalg.norm(expected))
-                p0 = np.array([[[a["x"], a["y"]]]], dtype=np.float32)
+                p0 = np.array([[[a["x"] * sx, a["y"] * sy]]], dtype=np.float32)
                 nxt, status = _lk(prev_gray, gray, p0)
                 cam = _background_flow(
-                    prev_gray, gray, (a["x"], a["y"]), float(a.get("r") or 8)
+                    prev_gray,
+                    gray,
+                    (a["x"] * sx, a["y"] * sy),
+                    float(a.get("r") or 8) * (sx + sy) * 0.5,
                 )
                 cam_v = np.array(cam, dtype=np.float32)
                 if nxt is not None and status is not None and int(status.reshape(-1)[0]) == 1:

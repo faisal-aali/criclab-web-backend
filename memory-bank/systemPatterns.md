@@ -170,6 +170,11 @@ PT → **BFC** if the trail ankle plants.
   motion. Keep large motion-blurred ovals (training ball / football-shaped); do
   not require a 4px circle. Never search only a tiny box on the wrist — that
   locks onto the hand (~6 km/h garbage).
+- **4K / high-res:** blob finders and CLAHE run on a working copy whose long
+  side is ≤1920 (`detect.collect_flight_candidates`); `x,y,r` are mapped back
+  to original pixels. Optical-flow validation downscales the same way. Pixel
+  gates (hand exclusion, min step, net travel) scale with frame size so a
+  12 px/frame poster crawl cannot pass as a ball.
 - Tracking: seed on the object that has **left the hand** and is moving
   downrange; greedy-chain; refine the dark-blob centroid; **ballistic fit**
   `x(t)=x0+vx·t`, `y(t)=y0+vy·t+a·t²` for release speed (not raw per-frame jumps).

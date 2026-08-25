@@ -17,7 +17,12 @@ from typing import Any
 import cv2
 import numpy as np
 
-from app.pipeline.cv_vision import hough_ball_candidates, validate_ball_path_on_video
+from app.pipeline.cv_vision import validate_ball_path_on_video
+
+
+def _px_scale(frame_w: int, frame_h: int) -> float:
+    """Gates were tuned at 1080p. 4K pixels are ~2× so the same constants miss."""
+    return max(1.0, min(float(frame_w or 1), float(frame_h or 1)) / 1080.0)
 
 
 def _dist(a: dict[str, Any], b: dict[str, Any]) -> float:
@@ -187,21 +192,22 @@ def track_ball_from_release(
         dx, dy = dx / n, dy / n
 
     per_frame: list[dict[str, Any]] = []
-    prev_gray = None
+    prev_work_gray = None
+    px = _px_scale(frame_w, frame_h)
+    min_hand_early = 12.0 * px
+    min_hand_late = 48.0 * px
+    edge_pad_near, edge_pad_far = 24.0 * px, 48.0 * px
+    min_down = 8.0 * px
+    downrange_r = 28.0 * px
+    turf_below_hand = 100.0 * px
     for idx, bgr in extract.iter_frame_range(video_path, start, end):
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         elapsed = max(0, idx - int(release_frame))
-        dark = detect.detect_dark_flight_candidates(bgr)
-        color = detect.detect_ball_color_candidates(bgr)
-        bright = detect.detect_bright_flight_candidates(bgr)
-        motion = detect.detect_ball_motion_candidates(prev_gray, gray) if prev_gray is not None else []
-        hough = hough_ball_candidates(bgr)
-        cands = detect.merge_ball_candidates(dark, color, bright, motion, hough)
-        min_hand = 48.0 if elapsed >= 4 else 12.0
+        cands, prev_work_gray = detect.collect_flight_candidates(bgr, prev_work_gray)
+        min_hand = min_hand_late if elapsed >= 4 else min_hand_early
         max_r = min(frame_w, frame_h) * 0.065
         # Downrange side follows the throw direction — never assume rightward.
         rightward = dx >= 0
-        edge_near, edge_far = (24.0, 48.0) if rightward else (48.0, 24.0)
+        edge_near, edge_far = (edge_pad_near, edge_pad_far) if rightward else (edge_pad_far, edge_pad_near)
         filtered = []
         for c in cands:
             if float(c.get("r") or 0) > max_r:
@@ -210,7 +216,7 @@ def track_ball_from_release(
                 continue
             # Large blobs clipped by the downrange edge are trees/posts, not the ball.
             at_downrange_edge = c["x"] > frame_w * 0.88 if rightward else c["x"] < frame_w * 0.12
-            if at_downrange_edge and float(c.get("r") or 0) > 28:
+            if at_downrange_edge and float(c.get("r") or 0) > downrange_r:
                 continue
             dh = float(np.hypot(c["x"] - hand_x, c["y"] - hand_y))
             if dh < min_hand:
@@ -218,15 +224,14 @@ def track_ball_from_release(
             # Turf is the bottom strip — not "72% of the frame". A 1080p clip
             # with the bowler in the lower half releases around y=0.7; a 0.72
             # cut deletes the white ball the moment it leaves the hand.
-            turf_y = min(frame_h * 0.92, max(hand_y + 100.0, frame_h * 0.82))
+            turf_y = min(frame_h * 0.92, max(hand_y + turf_below_hand, frame_h * 0.82))
             if c["y"] > turf_y:
                 continue
             down = (c["x"] - hand_x) * dx + (c["y"] - hand_y) * dy
-            if elapsed >= 4 and down < 8:
+            if elapsed >= 4 and down < min_down:
                 continue
             filtered.append(c)
         per_frame.append({"frame": int(idx), "candidates": filtered})
-        prev_gray = gray
 
     # Two independent ways to find the flight, because each fails differently.
     # Greedy chaining follows the nearest candidate and can be captured by a big
@@ -465,6 +470,7 @@ def _greedy_chain(
     have_v = False
     misses = 0
     last_r = float(seed.get("r") or 6)
+    last_streak = bool(seed.get("streak"))
     for item in per_frame[start_i + 1 :]:
         df_guess = max(1, int(item["frame"]) - int(path[-1]["frame"]))
         pred = (
@@ -479,7 +485,13 @@ def _greedy_chain(
             if d > step_lim:
                 continue
             r = float(c.get("r") or 6)
-            if last_r >= 10 and (r < last_r * 0.35 or r > last_r * 2.8):
+            # Motion-blurred streaks enclose a much larger circle than the next
+            # sharper disc. A hard radius ratio drops the real 120 fps ball.
+            if (
+                last_r >= 10
+                and not (last_streak or c.get("streak"))
+                and (r < last_r * 0.35 or r > last_r * 2.8)
+            ):
                 continue
             cost = d + 0.15 * abs(r - last_r)
             if cost < best:
@@ -496,6 +508,7 @@ def _greedy_chain(
         vy = (picked["y"] - path[-1]["y"]) / df
         have_v = True
         last_r = float(picked.get("r") or last_r)
+        last_streak = bool(picked.get("streak"))
         path.append(_point(item["frame"], picked))
     return path
 
@@ -513,44 +526,80 @@ def _best_flight_path(
 ) -> list[dict[str, Any]]:
     """Pick the moving downrange object — not the hand, not a tree."""
     max_step = _max_step_px(fps, mpp, frame_w, frame_h)
+    px = _px_scale(frame_w, frame_h)
+    min_dim = float(min(frame_w, frame_h) or 1)
+    cricket_r = 0.028 * min_dim
+    size_r = 18.0 * px
+    cell = max(25, int(round(0.013 * float(frame_w))))
+    seed_cell = max(40, int(round(0.021 * float(frame_w))))
+    min_down = 20.0 * px
+    min_dh = 36.0 * px
+    min_net = 70.0 * px
+    min_step = max(3.0, 0.004 * float(frame_w or 1280))
+    turf_below_hand = 100.0 * px
+    f0 = int(per_frame[0]["frame"]) if per_frame else 0
+    rel_est = f0 + 8  # track window opens 8 frames before release
+    max_above = max(220.0, 0.20 * float(frame_h))
     # Seed in *frames*, not seconds of container fps — an early pose-REL sits at
     # cocking, and the white ball only becomes a free blob 8–20 frames later.
     seed_horizon = min(len(per_frame), max(24, int(round(fps * 0.35))))
     raw: list[tuple[float, int, dict[str, Any]]] = []
     for i, item in enumerate(per_frame[:seed_horizon]):
+        if int(item["frame"]) < rel_est - 2:
+            continue
+        elapsed = max(0, int(item["frame"]) - rel_est)
+        max_seed_dh = max(240.0, 0.14 * float(frame_w)) + 55.0 * elapsed
         mid = [c for c in item["candidates"] if c["y"] < frame_h * 0.70]
         ranked = sorted(item["candidates"], key=lambda c: c.get("score") or 0, reverse=True)
         compact = sorted(
-            [c for c in item["candidates"] if float(c.get("r") or 0) <= min(frame_w, frame_h) * 0.03],
-            key=lambda c: c.get("score") or 0,
+            [c for c in item["candidates"] if float(c.get("r") or 0) <= cricket_r * 1.35 or c.get("streak")],
+            key=lambda c: c.get("compact_score") or c.get("score") or 0,
             reverse=True,
         )
-        pool = ranked[:4] + compact[:4] + sorted(mid, key=lambda c: c.get("r") or 0, reverse=True)[:3]
+        tiny = sorted(
+            [
+                c
+                for c in item["candidates"]
+                if 4.0 <= float(c.get("r") or 0) <= size_r
+            ],
+            key=lambda c: (
+                (1.4 if c.get("source") == "motion" else 1.0)
+                * (c.get("compact_score") or c.get("score") or 0)
+            ),
+            reverse=True,
+        )
+        pool = ranked[:4] + compact[:4] + tiny[:6] + sorted(mid, key=lambda c: c.get("r") or 0, reverse=True)[:3]
         seen_local = set()
         for c in pool:
-            key = (int(c["x"]) // 25, int(c["y"]) // 25)
+            key = (int(c["x"]) // cell, int(c["y"]) // cell)
             if key in seen_local:
                 continue
             seen_local.add(key)
             down = (c["x"] - hand_x) * dx + (c["y"] - hand_y) * dy
             dh = float(np.hypot(c["x"] - hand_x, c["y"] - hand_y))
-            turf_y = min(frame_h * 0.92, max(hand_y + 100.0, frame_h * 0.82))
-            if down < 20 or c["y"] > turf_y:
+            turf_y = min(frame_h * 0.92, max(hand_y + turf_below_hand, frame_h * 0.82))
+            if down < min_down or c["y"] > turf_y:
                 continue
-            if dh < 36:
+            if dh < min_dh or dh > max_seed_dh:
+                continue
+            if c["y"] < hand_y - max_above:
                 continue
             air = max(0.0, hand_y - c["y"])
             r = float(c.get("r") or 4)
             # Prefer cricket-ball sized movers over poster-sized blobs that happen
-            # to sit downrange of the hand.
-            size_fit = 1.0 if r <= 18 else max(0.25, 18.0 / r)
-            score = float(c.get("score") or r) * (1.0 + air / 80.0) * size_fit
+            # to sit downrange of the hand. Streaks (120 fps blur) enclose a
+            # larger circle than a disc — do not punish them as poster-sized.
+            if c.get("streak") or r <= size_r:
+                size_fit = 1.0
+            else:
+                size_fit = max(0.25, size_r / r)
+            score = float(c.get("score") or r) * (1.0 + air / (80.0 * px)) * size_fit
             raw.append((score, i, c))
     raw.sort(key=lambda t: t[0], reverse=True)
     seeds: list[tuple[float, int, dict[str, Any]]] = []
     used = set()
     for item in raw:
-        key = (int(item[2]["x"]) // 40, int(item[2]["y"]) // 40)
+        key = (int(item[2]["x"]) // seed_cell, int(item[2]["y"]) // seed_cell)
         if key in used:
             continue
         used.add(key)
@@ -565,7 +614,7 @@ def _best_flight_path(
         if len(chain) < 6:
             continue
         net = _dist(chain[0], chain[-1])
-        if net < 70:
+        if net < min_net:
             continue
         steps = [
             _dist(a, b) / max(1, int(b["frame"]) - int(a["frame"]))
@@ -573,7 +622,7 @@ def _best_flight_path(
         ]
         med_step = float(np.median(steps)) if steps else 0.0
         span = max(1, int(chain[-1]["frame"]) - int(chain[0]["frame"]))
-        if med_step < 3.0 or (net / span) < 3.0:
+        if med_step < min_step or (net / span) < min_step:
             continue
         # Alignment is measured over the first few frames only. `dx, dy` comes from
         # the bowling wrist's own velocity, which at release can point almost

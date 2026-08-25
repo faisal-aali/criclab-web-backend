@@ -155,8 +155,10 @@ def flight_geometry_ok(
     if net_x < max(48.0, 0.045 * float(frame_w or 1280)) and net_x < net_y * 0.55:
         return False, "Ball motion is mostly toward the camera — a km/h figure would be false"
     # Stationary-ish blob (tree/post) that barely moves.
+    # 2.5 px/frame is a crawl on 4K (~15 km/h on a night-nets lock).
     span = max(1, int(pts[-1]["frame"]) - int(pts[0]["frame"]))
-    if (net / span) < 2.5:
+    min_step = max(2.5, 0.004 * float(frame_w or 1280))
+    if (net / span) < min_step:
         return False, "Tracked object is too slow in the image to be a cricket ball"
     _ = frame_h
     return True, ""
