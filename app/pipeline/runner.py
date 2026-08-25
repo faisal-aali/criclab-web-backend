@@ -306,4 +306,5 @@ def _track_ball_seeded(
             throw_dir=throw_dir,
         )
     except Exception:
+        traceback.print_exc()
         return []

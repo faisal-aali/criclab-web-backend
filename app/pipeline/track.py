@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 
 from app.pipeline.cv_vision import validate_ball_path_on_video
+from app.pipeline.view import flight_geometry_ok
 
 
 def _px_scale(frame_w: int, frame_h: int) -> float:
@@ -258,10 +259,12 @@ def track_ball_from_release(
     # is 18 frames, which drops a real lock a few frames late, while a poster
     # blob can start "soon" after REL hundreds of pixels from the wrist.
     max_start = int(release_frame) + max(16, min(40, int(round(fps * 0.28))))
-    max_hand_dist = max(220.0, 0.16 * float(frame_w))
+    max_hand_dist = max(280.0, 0.22 * float(frame_w))
+    max_start_above = max(220.0, 0.20 * float(frame_h))
 
     best: list[dict[str, Any]] = []
-    best_key: tuple[int, int] | None = None
+    best_key: tuple[float, int, int] | None = None
+    min_geo_step = max(3.0, 0.004 * float(frame_w or 1280))
     for seed in seeds:
         cand = _longest_continuous(seed)
         if len(cand) < 6:
@@ -288,6 +291,19 @@ def track_ball_from_release(
         dh0 = float(np.hypot(float(cand[0]["x"]) - hand_x, float(cand[0]["y"]) - hand_y))
         if dh0 > max_hand_dist:
             continue
+        if float(cand[0]["y"]) < hand_y - max_start_above:
+            continue
+        span = max(1, int(cand[-1]["frame"]) - int(cand[0]["frame"]))
+        net = _dist(cand[0], cand[-1])
+        speed = net / span
+        # A long poster crawl outranks a short real flight on point-count.
+        # Image speed is what distinguishes the ball; geometry is the same
+        # gate metrics will apply, so failing it here lets another seed win.
+        if speed < min_geo_step:
+            continue
+        ok_geo, _ = flight_geometry_ok(cand, frame_w, frame_h)
+        if not ok_geo:
+            continue
         cand = _refine_centroids(video_path, cand, frame_w, frame_h)
         detected = [p for p in cand if p.get("source") != "interpolated"]
         cand = fill_every_frame(cand)
@@ -297,9 +313,8 @@ def track_ball_from_release(
         ok_flow, flow_note, flow_stats = validate_ball_path_on_video(video_path, flow_pts, frame_w, frame_h)
         if not ok_flow:
             continue
-        # Longer flights measure gravity and speed better; on a tie take the one
-        # that starts earlier, because release speed is read off the first frames.
-        key = (len(cand), -int(cand[0]["frame"]))
+        # Faster flights are the ball; length is the tie-break, then earlier start.
+        key = (speed, len(cand), -int(cand[0]["frame"]))
         if best_key is None or key > best_key:
             best_key, best = key, cand
             best[0]["flow_note"] = flow_note
@@ -569,6 +584,12 @@ def _best_flight_path(
             reverse=True,
         )
         pool = ranked[:4] + compact[:4] + tiny[:6] + sorted(mid, key=lambda c: c.get("r") or 0, reverse=True)[:3]
+        # Always consider compact movers still near the hand — the 4K/120fps
+        # ball is a 5 px speck that loses a global score fight with posters.
+        for c in item["candidates"]:
+            dh_c = float(np.hypot(c["x"] - hand_x, c["y"] - hand_y))
+            if min_dh <= dh_c <= max_seed_dh and float(c.get("r") or 0) <= size_r * 1.5:
+                pool.append(c)
         seen_local = set()
         for c in pool:
             key = (int(c["x"]) // cell, int(c["y"]) // cell)
