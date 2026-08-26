@@ -55,6 +55,10 @@ INDEXES: dict[str, list[IndexModel]] = {
     ],
     "bookings": [
         IndexModel([("user_id", ASCENDING), ("starts_at", DESCENDING)], name="user_upcoming"),
+        # Building a coach's calendar reads every live booking in the horizon,
+        # and the reminder sweep reads by status and start time.
+        IndexModel([("coach_id", ASCENDING), ("status", ASCENDING), ("starts_at", ASCENDING)], name="coach_live"),
+        IndexModel([("status", ASCENDING), ("starts_at", ASCENDING)], name="status_starts"),
         # Stops the same coach being double-booked for one slot. Partial so that
         # cancelled bookings free the slot again.
         IndexModel(
@@ -75,6 +79,8 @@ INDEXES: dict[str, list[IndexModel]] = {
     ],
     "kb_chunks": [
         IndexModel([("source", ASCENDING)], name="by_source"),
+        # Vectors are only valid for the model that produced them.
+        IndexModel([("model", ASCENDING)], name="by_model"),
     ],
     # Existing analysis collections — these were previously unindexed and the
     # history listing scanned every delivery.

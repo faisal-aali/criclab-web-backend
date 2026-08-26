@@ -54,7 +54,18 @@ async def ollama_available() -> dict[str, Any]:
         }
 
 
-async def generate_text(prompt: str, system: str | None = None, *, num_predict: int = 500) -> str:
+async def generate_text(
+    prompt: str,
+    system: str | None = None,
+    *,
+    num_predict: int = 500,
+    timeout_s: float = 300.0,
+) -> str:
+    """Generate once. `timeout_s` is short for interactive callers.
+
+    A delivery report can take minutes and nobody is waiting on the page;
+    somebody typing into a chat box is, so that caller passes a low ceiling
+    and falls back rather than leaving the request hanging."""
     settings = get_settings()
     payload: dict[str, Any] = {
         "model": settings.ollama_model,
@@ -65,7 +76,7 @@ async def generate_text(prompt: str, system: str | None = None, *, num_predict: 
     }
     if system:
         payload["system"] = system
-    timeout = httpx.Timeout(300.0, connect=10.0)
+    timeout = httpx.Timeout(timeout_s, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(f"{settings.ollama_base_url}/api/generate", json=payload)
         r.raise_for_status()
