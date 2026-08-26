@@ -8,7 +8,12 @@ _client: AsyncIOMotorClient | None = None
 def get_client() -> AsyncIOMotorClient:
     global _client
     if _client is None:
-        _client = AsyncIOMotorClient(get_settings().mongodb_uri)
+        # tz_aware: BSON stores UTC milliseconds, and without this the driver
+        # hands back *naive* datetimes. Those serialise without an offset, so a
+        # browser parses them as local time — a timestamp created seconds ago
+        # renders as hours old, and any server-side comparison against an aware
+        # "now" is wrong by the machine's UTC offset.
+        _client = AsyncIOMotorClient(get_settings().mongodb_uri, tz_aware=True)
     return _client
 
 

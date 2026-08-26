@@ -24,6 +24,24 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     default_meters_per_pixel: float | None = None
 
+    # --- Auth ---
+    # No default for the signing key: an app that silently boots on a shared
+    # fallback secret issues forgeable tokens. Startup fails loudly instead.
+    jwt_secret: str = ""
+    jwt_algorithm: str = "HS256"
+    access_token_minutes: int = 15
+    refresh_token_days: int = 30
+
+    # --- Email (OTP, password reset, notifications) ---
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_pass: str = ""
+    email_from: str = ""
+    email_from_name: str = "CricLab"
+    # Where links in emails point — the frontend, not this API.
+    app_base_url: str = "http://localhost:5173"
+
     # Cloudinary (processed video + PDF hosting)
     cloudinary_url: str | None = None
     cloudinary_cloud_name: str | None = None
@@ -32,6 +50,11 @@ class Settings(BaseSettings):
 
     @field_validator(
         "default_meters_per_pixel",
+        "jwt_secret",
+        "smtp_host",
+        "smtp_user",
+        "smtp_pass",
+        "email_from",
         "cloudinary_url",
         "cloudinary_cloud_name",
         "cloudinary_api_key",
@@ -61,6 +84,15 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def email_configured(self) -> bool:
+        """Email is optional in development; the app degrades to logging OTPs."""
+        return bool(self.smtp_host and self.smtp_user and self.smtp_pass and self.email_from)
+
+    @property
+    def auth_configured(self) -> bool:
+        return bool(self.jwt_secret)
 
     @property
     def cloudinary_configured(self) -> bool:

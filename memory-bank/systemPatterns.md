@@ -142,6 +142,37 @@ torso, fence, or a stationary tree is not a ball track: return null + reason.
   tracked points.
 - **Profile `bowling_arm`** wins over auto side detection.
 
+## Accounts, tokens and secrets
+
+- **Never confirm whether an address has an account.** Signup, sign-in and
+  password recovery answer identically whether or not the email is known. A
+  duplicate signup mails the real owner rather than telling the caller.
+- **Access tokens are JWTs; refresh tokens are not.** Refresh tokens are opaque
+  random strings persisted only as SHA-256 digests, so a database leak yields no
+  usable sessions and any one token can be revoked. Rotate on every renewal.
+- **Invalidate by marker, not by clock.** Tokens carry `pwd_at`, the account's
+  password-change stamp, compared against the current value. Comparing `iat`
+  against a timestamp cannot work: JWT issues at whole-second resolution, so a
+  replacement token minted in the same second as the change is
+  indistinguishable from the one being replaced.
+- **The Mongo client is `tz_aware=True`.** BSON stores UTC millis and the driver
+  otherwise returns *naive* datetimes — which serialise without an offset, so
+  browsers read them as local time, and server-side comparisons against an aware
+  "now" are wrong by the machine's UTC offset.
+- **Uniqueness belongs to the index.** A read-then-write check in a handler is a
+  race two concurrent signups both win.
+- **`public_user()` is an allow-list.** New stored fields are not exposed until
+  named, so a future secret cannot leak by being forgotten.
+- **Sending email never decides request success.** Signup completes with the mail
+  server down; the user resends.
+- **Secrets live in `.env` only** (gitignored) and in `Settings`. Never logged,
+  never returned, never in an exception message. `.env.example` carries
+  placeholders. Recipient addresses are masked in logs.
+- **Rate limits are Mongo-backed** so they hold across workers, and TTL-indexed
+  so counters expire themselves.
+- **Guards hide UI; the API enforces access.** Every handler scopes to the caller
+  by putting `user_id` in the query filter — never trusting a client-supplied id.
+
 ## Frontend API contract (sibling repo: criclab-web-frontend)
 
 UI lives in `../criclab-web-frontend`. Backend must keep this contract stable:

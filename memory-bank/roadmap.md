@@ -24,6 +24,12 @@ High-level features. Detail lives in `tasks/`.
 | FEAT-018 | **Capture-rate recovery** | Done | Slow-motion clips timed from the ball's fall, not the container fps |
 | FEAT-019 | **Delivery type & throwing screen** | Done | Pace band from measured speed; ICC 15° screening only where the view supports it |
 | FEAT-017 | Train / drills | Done | Closed YouTube catalog + DrillShelf + `/train` library |
+| FEAT-020 | **Accounts & auth** | Done | JWT access + rotating refresh, OTP email verification, recovery, guards |
+| FEAT-021 | **Transactional email** | Done | SMTP over aiosmtplib, branded templates, credentials env-only |
+| FEAT-022 | **Notifications** | Done | In-app centre, unread badge, keyset paging |
+| FEAT-023 | Support ticketing | Planned | Collections + indexes ready; no service or UI yet |
+| FEAT-024 | Coaching bookings | Planned | Collections + indexes ready; no service or UI yet |
+| FEAT-025 | RAG assistant | Planned | `kb_chunks` indexed; no retrieval or UI yet |
 
 ## Change log
 
@@ -84,3 +90,10 @@ High-level features. Detail lives in `tasks/`.
   release height vs stature); failing checks lower confidence and are reported.
   Roughly twenty absolute-pixel / pixel-per-frame thresholds were re-expressed
   against body size, ball size or a real m/s.
+- **26 Aug 2026 (TASK-010):** Accounts platform. CricLab had no authentication at
+  all; it now has signup with emailed OTP verification, sign-in, short-lived JWT
+  access tokens with rotating opaque refresh tokens, password recovery and
+  change, session listing and revocation, route guards, Mongo-backed rate
+  limiting, a security audit trail, branded transactional email over SMTP, and an
+  in-app notification centre. Three real bugs were caught by the end-to-end suite
+  — see TASK-010. Support, coaching and the assistant are not built.

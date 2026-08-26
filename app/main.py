@@ -1,11 +1,13 @@
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import balltrack, coaching, health, videos
+from app.api import auth, balltrack, coaching, health, notifications, videos
 from app.config import get_settings
+from app.db.indexes import ensure_indexes
 from app.db.mongo import close_mongo
 
 
@@ -14,6 +16,12 @@ async def lifespan(_: FastAPI):
     settings = get_settings()
     for sub in ("videos", "artifacts", "frames", "balltrack"):
         (settings.storage_path / sub).mkdir(parents=True, exist_ok=True)
+    # Idempotent; also the only place uniqueness and TTL rules are declared.
+    await ensure_indexes()
+    if not settings.auth_configured:
+        logging.getLogger("criclab").warning(
+            "JWT_SECRET is not set — authentication endpoints will refuse to issue tokens."
+        )
     yield
     await close_mongo()
 
@@ -29,6 +37,8 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
+app.include_router(auth.router)
+app.include_router(notifications.router)
 app.include_router(videos.router)
 app.include_router(balltrack.router)
 app.include_router(coaching.router)
