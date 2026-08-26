@@ -663,7 +663,10 @@ def compute_metrics(
     # speed on a clip whose ball plainly travels across frame. The flight had to
     # pass optical-flow validation and flight_geometry_ok to get here, so this
     # widens what we measure without lowering the bar for what counts as a ball.
-    ball_geo_ok, _ball_geo_reason = flight_geometry_ok(ball_track, frame_w, frame_h)
+    # `fps` here is the recovered capture rate, so the speed floor can be exact.
+    ball_geo_ok, _ball_geo_reason = flight_geometry_ok(
+        ball_track, frame_w, frame_h, fps, mpp, rate_is_certain=True
+    )
     view_overridden_by_ball = bool(ball_geo_ok) and not speed_view_ok
     if view_overridden_by_ball:
         speed_view_ok = True

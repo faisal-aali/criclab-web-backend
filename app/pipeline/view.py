@@ -21,6 +21,49 @@ from app.pipeline.action import frame_by_index
 FRONT_ON_RATIO = 0.23
 THREE_QUARTER_RATIO = 0.145
 
+# Slowest thing in the world we would still call a delivery. Anything below this
+# is a walked-in throw or a false lock, whatever the camera.
+MIN_BALL_MPS = 8.0
+# A container frame rate is a *lower* bound on the capture rate: a slow-motion
+# export understates it, never overstates it. When converting a real-world speed
+# floor into pixels per frame we therefore assume the clip could be this many
+# times slower than it claims, which makes the floor conservative — it will not
+# reject a genuine flight just because the file lies about its rate.
+SLOWMO_HEADROOM = 8.0
+
+
+def min_ball_step_px(
+    frame_w: int,
+    frame_h: int,
+    fps: float | None = None,
+    meters_per_pixel: float | None = None,
+    *,
+    fraction: float = 1.0,
+    rate_is_certain: bool = False,
+) -> float:
+    """Slowest image motion, in px per frame, that could still be a bowled ball.
+
+    Pixels per frame is not a speed: it falls with the capture rate and rises
+    with how much of the frame the bowler fills. A fixed px/frame floor — even
+    one scaled by frame width — therefore means a different real-world speed on
+    every clip, and on 4K high-frame-rate footage it lands *above* a genuine
+    delivery and rejects it. Convert a real speed instead, whenever we have the
+    scale to do so, and fall back to a small fraction of the diagonal only when
+    we do not.
+    """
+    if meters_per_pixel and meters_per_pixel > 0 and fps and fps > 1:
+        # Headroom only while the rate is still the container's claim. Once the
+        # timebase has recovered the real capture rate the floor can be exact,
+        # and it needs to be: with headroom it drops to ~1 px/frame and stops
+        # rejecting the slow background crawls it exists to catch.
+        headroom = 1.0 if rate_is_certain else SLOWMO_HEADROOM
+        px = (MIN_BALL_MPS * fraction) / (
+            float(meters_per_pixel) * float(fps) * headroom
+        )
+        return max(1.0, float(px))
+    diag = float(np.hypot(frame_w or 1280, frame_h or 720))
+    return max(1.5, 0.0025 * diag * fraction)
+
 
 def classify_camera_view(
     pose_track: dict[str, Any],
@@ -131,34 +174,84 @@ def _wrist_lateral_ratio(
     dx = abs(float(w1[0] - w0[0]))
     dy = abs(float(w1[1] - w0[1]))
     den = dx + dy
-    if den < 8:
+    # Scale the "did the wrist actually travel" floor to the bowler, not the
+    # sensor — 8 px is a real move at 480p and landmark noise at 4K.
+    body = posemod.body_pixel_height(end) or posemod.body_pixel_height(start)
+    if den < max(4.0, 0.02 * float(body or 400.0)):
         return None
     return dx / den
+
+
+def flight_is_trackable(
+    ball_track: list[dict[str, Any]] | None,
+    frame_w: int,
+    frame_h: int,
+    fps: float | None = None,
+    meters_per_pixel: float | None = None,
+) -> tuple[bool, str]:
+    """Is this a real moving object that left the hand — regardless of km/h?
+
+    Deliberately separate from `flight_geometry_ok`. Whether we found the ball
+    and whether its direction lets us quote a speed are different questions, and
+    conflating them throws away a perfectly good flight on any clip filmed from
+    behind or down the pitch: the overlay then draws no ball, the release cannot
+    snap to it, and the gravity timebase loses its only input. Speed is refused
+    separately, by `flight_geometry_ok`, with its own reason.
+    """
+    if not ball_track or len(ball_track) < 6:
+        return False, "Ball path too short to be a flight"
+    pts = sorted(ball_track, key=lambda p: int(p["frame"]))
+    net = float(np.hypot(
+        float(pts[-1]["x"]) - float(pts[0]["x"]),
+        float(pts[-1]["y"]) - float(pts[0]["y"]),
+    ))
+    span = max(1, int(pts[-1]["frame"]) - int(pts[0]["frame"]))
+    # A ball recedes hard on a down-the-pitch view, so its net image travel can
+    # be small; what it never does is sit still. Rate, not distance, is the test.
+    min_step = min_ball_step_px(frame_w, frame_h, fps, meters_per_pixel, fraction=0.5)
+    if (net / span) < min_step:
+        return False, "Tracked object is too slow in the image to be a cricket ball"
+    return True, ""
 
 
 def flight_geometry_ok(
     ball_track: list[dict[str, Any]] | None,
     frame_w: int,
     frame_h: int,
+    fps: float | None = None,
+    meters_per_pixel: float | None = None,
+    rate_is_certain: bool = False,
 ) -> tuple[bool, str]:
-    """Reject tracks that did not travel across the frame (depth-only / blob hop)."""
+    """Can this flight support an image-plane km/h? (Not: is it a real flight.)"""
     if not ball_track or len(ball_track) < 6:
         return False, "Ball path too short to measure speed"
     pts = sorted(ball_track, key=lambda p: int(p["frame"]))
     net_x = abs(float(pts[-1]["x"]) - float(pts[0]["x"]))
     net_y = abs(float(pts[-1]["y"]) - float(pts[0]["y"]))
     net = float(np.hypot(net_x, net_y))
-    min_net = max(70.0, 0.06 * float(frame_w or 1280))
+    min_net = 0.04 * float(np.hypot(frame_w or 1280, frame_h or 720))
     if net < min_net:
         return False, "Ball did not travel far enough in the image to measure speed"
     # Mostly vertical / toward camera: reporting km/h would under-read badly.
-    if net_x < max(48.0, 0.045 * float(frame_w or 1280)) and net_x < net_y * 0.55:
+    if net_x < 0.03 * float(np.hypot(frame_w or 1280, frame_h or 720)) and net_x < net_y * 0.55:
         return False, "Ball motion is mostly toward the camera — a km/h figure would be false"
-    # Stationary-ish blob (tree/post) that barely moves.
-    # 2.5 px/frame is a crawl on 4K (~15 km/h on a night-nets lock).
+    # Stationary-ish blob (tree/post) that barely moves. Expressed as a real
+    # speed, not a pixel count — see min_ball_step_px.
     span = max(1, int(pts[-1]["frame"]) - int(pts[0]["frame"]))
-    min_step = max(2.5, 0.004 * float(frame_w or 1280))
+    # Two floors, whichever is higher. The speed-derived one needs the frame rate
+    # to be known; the radius-derived one does not — a ball in flight clears a
+    # good fraction of its own radius every frame at any capture rate, while a
+    # poster or fence crawl moves a small fraction of its own size. That keeps a
+    # useful floor in place before the timebase has run, when the rate-derived
+    # one has to be generous.
+    rs = [float(p.get("r") or 0) for p in pts if float(p.get("r") or 0) > 0]
+    ball_r = float(np.median(rs)) if rs else 0.0
+    min_step = max(
+        min_ball_step_px(
+            frame_w, frame_h, fps, meters_per_pixel, rate_is_certain=rate_is_certain
+        ),
+        0.35 * ball_r,
+    )
     if (net / span) < min_step:
         return False, "Tracked object is too slow in the image to be a cricket ball"
-    _ = frame_h
     return True, ""

@@ -51,6 +51,24 @@ def _series(frames: list[dict[str, Any]], name: str) -> tuple[list[int], np.ndar
     return idxs, (np.array(pts, dtype=float) if pts else np.empty((0, 2)))
 
 
+def _speeds_from_positions(
+    idxs: list[int],
+    pts: np.ndarray,
+    fps: float,
+) -> list[float]:
+    """Light ~25 ms position smooth, then central-difference speed."""
+    if len(pts) < 3:
+        return [0.0] * len(idxs)
+    pos_win = _odd_win(max(3, int(round(fps * 0.025))))
+    pts = _smooth_positions(pts, pos_win)
+    speeds = [0.0]
+    for i in range(1, len(pts)):
+        df = max(1, idxs[i] - idxs[i - 1])
+        speeds.append(float(np.linalg.norm(pts[i] - pts[i - 1]) / df))
+    spd_win = _odd_win(max(3, int(round(fps * 0.018))))
+    return _moving_avg(speeds, spd_win)
+
+
 def _wrist_speed(
     frames: list[dict[str, Any]],
     name: str,
@@ -63,16 +81,7 @@ def _wrist_speed(
     Raw 1-frame deltas at 200 fps inflate km/h from landmark jitter.
     """
     idxs, pts = _series(frames, name)
-    if len(pts) < 3:
-        return idxs, [0.0] * len(idxs)
-    pos_win = _odd_win(max(3, int(round(fps * 0.025))))
-    pts = _smooth_positions(pts, pos_win)
-    speeds = [0.0]
-    for i in range(1, len(pts)):
-        df = max(1, idxs[i] - idxs[i - 1])
-        speeds.append(float(np.linalg.norm(pts[i] - pts[i - 1]) / df))
-    spd_win = _odd_win(max(3, int(round(fps * 0.018))))
-    return idxs, _moving_avg(speeds, spd_win)
+    return idxs, _speeds_from_positions(idxs, pts, fps)
 
 
 def _robust_peak_speed(idxs: list[int], speed: list[float]) -> tuple[int | None, float | None]:
@@ -91,6 +100,82 @@ def _wrist_at(frames: list[dict[str, Any]], side: str, frame_i: int):
     return posemod.point(fr, f"{side}_wrist") if fr is not None else None
 
 
+def _wrist_on_arm(
+    frames: list[dict[str, Any]],
+    side: str,
+    frame_i: int,
+    wr: np.ndarray | None,
+    frame_h: float,
+) -> bool:
+    """False when MediaPipe has parked the wrist on a wall sticker / poster."""
+    if wr is None:
+        return False
+    fr = frame_by_index(frames, frame_i)
+    el = posemod.point(fr, f"{side}_elbow") if fr is not None else None
+    if el is None:
+        return True
+    reach = float(np.hypot(float(wr[0] - el[0]), float(wr[1] - el[1])))
+    return reach <= max(160.0, 0.22 * float(frame_h or 1080))
+
+
+# A bowling wrist tops out around 25 m/s. Anything past that in one frame is the
+# landmark jumping, not the arm moving.
+MAX_WRIST_MPS = 25.0
+
+
+def _wrist_teleport(
+    frames: list[dict[str, Any]],
+    side: str,
+    frame_i: int,
+    frame_h: float,
+    fps: float = 30.0,
+) -> bool:
+    """True when the wrist landmark jumped farther than an arm can move in one frame.
+
+    "Farther than an arm can move" is a speed, so the bound has to carry the
+    frame rate. As a fixed pixel count it inverts across the input range: at
+    30 fps a real wrist covers ~90-190 px between frames at 1080p, so the true
+    release frames get thrown out as teleports, while at 240 fps it covers ~12 px
+    and genuine landmark jumps sail through.
+    """
+    wr = _wrist_at(frames, side, int(frame_i))
+    prev = _wrist_at(frames, side, int(frame_i) - 1)
+    if wr is None or prev is None:
+        return False
+    fr = frame_by_index(frames, int(frame_i))
+    body = posemod.body_pixel_height(fr) if fr is not None else None
+    if body:
+        # Body height is ~1.8 m of the same pixels, so px-per-metre = body / 1.8.
+        max_jump = MAX_WRIST_MPS * (float(body) / 1.8) / max(float(fps), 1.0)
+    else:
+        max_jump = 0.5 * float(frame_h or 1080) / max(float(fps), 1.0) * 3.0
+    max_jump = max(max_jump, 0.03 * float(frame_h or 1080))
+    return float(np.hypot(float(wr[0] - prev[0]), float(wr[1] - prev[1]))) > max_jump
+
+
+def last_on_arm_wrist(
+    frames: list[dict[str, Any]],
+    side: str,
+    frame_i: int,
+    frame_h: float,
+    lookback: int = 16,
+    fps: float = 30.0,
+) -> tuple[int, tuple[float, float] | None]:
+    """Walk back across a 1-frame wrist teleport. Does not rewrite the pose series."""
+    for back in range(0, max(0, int(lookback)) + 1):
+        fi = int(frame_i) - back
+        wr = _wrist_at(frames, side, fi)
+        if wr is None or not _wrist_on_arm(frames, side, fi, wr, frame_h):
+            continue
+        if _wrist_teleport(frames, side, fi, frame_h, fps):
+            continue
+        return fi, (float(wr[0]), float(wr[1]))
+    wr = _wrist_at(frames, side, int(frame_i))
+    if wr is None:
+        return int(frame_i), None
+    return int(frame_i), (float(wr[0]), float(wr[1]))
+
+
 def _refine_release_frame(
     frames: list[dict[str, Any]],
     side: str,
@@ -98,6 +183,7 @@ def _refine_release_frame(
     speed: list[float],
     peak_pos: int,
     fps: float,
+    frame_h: int = 1080,
 ) -> int:
     """Release = last near-peak wrist speed after cocking, along the throw.
 
@@ -108,10 +194,13 @@ def _refine_release_frame(
     """
     peak = speed[peak_pos]
     pre = max(1, int(round(fps * 0.04)))
-    # Leave is ~50–120 ms after the highest wrist. Cap in *frames* so a native
-    # 120 fps clip cannot walk 0.32 s into follow-through (wrist on the hip,
-    # ball long gone). A 30 fps slow-mo export still gets at least 8 frames.
-    post = max(8, min(20, int(round(fps * 0.16))))
+    # Leave is ~50-120 ms after the highest wrist, so the window is 0.16 s of
+    # *real* time. Clamping it to 8-20 absolute frames only gave that near
+    # 120 fps: a 30 fps container holding a 240 fps capture got 8 frames = 33 ms
+    # of real time and stopped short of leave-hand, while a native 240 fps clip
+    # got 20 frames = 83 ms and also stopped short. A small floor keeps enough
+    # samples to choose between on genuinely low-rate clips.
+    post = max(4, int(round(fps * 0.16)))
     lo, hi = peak_pos, peak_pos
     while lo > 0 and idxs[peak_pos] - idxs[lo] <= pre:
         lo -= 1
@@ -122,7 +211,7 @@ def _refine_release_frame(
     mer_y = 1e18
     for i in range(lo, hi + 1):
         wr = _wrist_at(frames, side, idxs[i])
-        if wr is None:
+        if wr is None or not _wrist_on_arm(frames, side, idxs[i], wr, frame_h):
             continue
         if float(wr[1]) < mer_y:
             mer_y = float(wr[1])
@@ -142,14 +231,15 @@ def _refine_release_frame(
 
     best_i = mer_i
     best_score = -1e18
-    min_travel = 18.0
-    max_drop = 45.0
+    px = max(1.0, float(frame_h or 1080) / 1080.0)
+    min_travel = 18.0 * px
+    max_drop = 45.0 * px
     for i in range(mer_i, hi + 1):
         if speed[i] < 0.50 * peak and i > mer_i + 1:
             if speed[i] < 0.35 * peak:
                 break
         wr = _wrist_at(frames, side, idxs[i])
-        if wr is None:
+        if wr is None or not _wrist_on_arm(frames, side, idxs[i], wr, frame_h):
             continue
         # Past leave-hand the bowling wrist falls toward the hip. Keep searching
         # along the throw, but stop once the hand has clearly dropped off MER.
@@ -167,6 +257,20 @@ def _refine_release_frame(
     if best_i == mer_i:
         best_i = min(hi, mer_i + 1)
     return int(idxs[best_i])
+
+
+def _body_px_near(frames: list[dict[str, Any]], frame_i: int | None) -> float | None:
+    """Bowler's pixel stature near a frame — the scale anatomy gates belong on."""
+    if frame_i is None:
+        return None
+    best = None
+    for f in frames:
+        if abs(int(f["frame"]) - int(frame_i)) > 8:
+            continue
+        h = posemod.body_pixel_height(f)
+        if h and (best is None or h > best):
+            best = float(h)
+    return best
 
 
 def ball_leave_frame(
@@ -234,10 +338,17 @@ def ball_leave_frame(
             best_d = d
             best_fr = fr
 
-    if best_fr is None or best_d > max(96.0, 3.2 * r0):
+    # Scale purely off the ball and the bowler. With floors of 96 px and 14 px
+    # the max() always won (r0 is typically 6-20 px), so both gates were absolute
+    # pixels wearing a ball-relative disguise: 96 px is 13% of frame height at
+    # 720p — accepting a wrist nowhere near the ball — and 4% at 4K, rejecting a
+    # valid snap. These decide whether release is pinned to a measurement at all.
+    body_px = _body_px_near(frames, best_fr if best_fr is not None else pose_rel)
+    near_tol = max(3.2 * r0, 0.06 * body_px) if body_px else 3.2 * r0
+    if best_fr is None or best_d > near_tol:
         return None
 
-    thresh = best_d + max(14.0, 0.45 * r0)
+    thresh = best_d + (max(0.45 * r0, 0.012 * body_px) if body_px else 0.45 * r0)
     leave = best_fr
     for fr in sorted(k for k in dist_at if k >= best_fr):
         if dist_at[fr] <= thresh:
@@ -277,7 +388,8 @@ def _plant_frame(
     candidates: list[tuple[int, Any]],
     *,
     fps: float,
-    min_drop_px: float = 6.0,
+    body_px: float | None = None,
+    min_drop_px: float | None = None,
 ) -> int | None:
     """First frame of the final plateau: when the ankle reached the height it holds.
 
@@ -295,6 +407,11 @@ def _plant_frame(
     ys = [float(p[1]) for _, p in candidates]
     y_smooth = _moving_avg(ys, _odd_win(max(3, int(round(fps * 0.03)))))
     hi, lo = max(y_smooth), min(y_smooth)
+    # "Did the foot descend at all" scales with the bowler, not the sensor: a
+    # fixed 6 px is landmark noise at 4K and more than a genuine small plant on a
+    # wide 480p shot.
+    if min_drop_px is None:
+        min_drop_px = max(2.0, 0.015 * float(body_px)) if body_px else 6.0
     if hi - lo < min_drop_px:
         return None  # no descent in this window — nothing planted here
     settled = float(y_smooth[-1])
@@ -335,7 +452,7 @@ def _detect_front_foot_contact(
         (i, p) for i, p in zip(idxs, pts)
         if release_frame - max_gap <= i <= release_frame - min_gap
     ]
-    return _plant_frame(candidates, fps=fps)
+    return _plant_frame(candidates, fps=fps, body_px=_body_px_near(frames, release_frame))
 
 
 def _detect_back_foot_contact(
@@ -357,7 +474,7 @@ def _detect_back_foot_contact(
         (i, p) for i, p in zip(idxs, pts)
         if end - max_before <= i <= end - min_before
     ]
-    return _plant_frame(candidates, fps=fps)
+    return _plant_frame(candidates, fps=fps, body_px=_body_px_near(frames, end))
 
 
 def _detect_mer(
@@ -384,19 +501,38 @@ def _detect_mer(
         score = (180.0 - float(elbow))
         if float(wr[1]) < float(el[1]):
             score += 18.0
-        score += 0.02 * float(np.linalg.norm(wr - sh))
+        # Normalise the reach term against the bowler's own pixel size, or it
+        # roughly doubles from 1080p to 4K and MER lands on a different frame at
+        # different resolutions while every other term stays in degrees. With no
+        # body height to normalise against, leave the term out rather than let a
+        # raw pixel length outvote the angles.
+        body_px = posemod.body_pixel_height(f)
+        if body_px:
+            score += 18.0 * float(np.linalg.norm(wr - sh)) / float(body_px)
         if score > best_score:
             best_score = score
             best_fr = fr
     return best_fr
 
 
+# Slowest hip-shoulder separation change we would call "the hips turning".
+# In degrees per second, so it means the same thing at any capture rate.
+MIN_HIP_ROT_DEG_S = 4.5
+
+
 def _detect_hip_rotation(
     frames: list[dict[str, Any]],
     start_frame: int,
     release_frame: int,
+    fps: float = 30.0,
 ) -> int | None:
-    """Frame of peak 2D hip–shoulder separation change (estimated, not 3D rotation)."""
+    """Frame of peak 2D hip-shoulder separation change (estimated, not 3D rotation).
+
+    The threshold is a rate in degrees per second. Held as degrees per *frame* it
+    fell by the frame-rate ratio for the same physical turn, so hip_rotation was
+    simply absent from the phase set on every high-frame-rate or slow-motion clip
+    and present on 30 fps ones.
+    """
     prev = None
     best_fr = None
     best_d = 0.0
@@ -419,7 +555,7 @@ def _detect_hip_rotation(
                 best_d = d
                 best_fr = fr
         prev = (fr, sep)
-    if best_d < 0.15:
+    if best_d * float(fps) < MIN_HIP_ROT_DEG_S:
         return None
     return best_fr
 
@@ -451,6 +587,7 @@ def analyze_action(
         return result
 
     fps = float(pose_track.get("fps") or 30.0)
+    frame_h = int(pose_track.get("height") or 1080)
     declared = (bowling_arm or "").strip().lower()
     if declared not in {"left", "right"}:
         declared = None
@@ -469,15 +606,18 @@ def analyze_action(
     else:
         side, idxs, speed = "left", l_idx, l_speed
 
-    release_frame, peak = _robust_peak_speed(idxs, speed)
-    if release_frame is None or peak is None or peak <= 0:
+    peak_frame, peak = _robust_peak_speed(idxs, speed)
+    if peak_frame is None or peak is None or peak <= 0:
         return result
 
-    peak_pos = idxs.index(release_frame) if release_frame in idxs else int(np.argmax(speed))
+    peak_wrist_frame = int(peak_frame)
+    peak_pos = idxs.index(peak_frame) if peak_frame in idxs else int(np.argmax(speed))
     if release_override is not None:
         release_frame = int(release_override)
     else:
-        release_frame = _refine_release_frame(frames, side, idxs, speed, peak_pos, fps)
+        release_frame = _refine_release_frame(
+            frames, side, idxs, speed, peak_pos, fps, frame_h
+        )
     if release_frame in idxs:
         peak_pos = idxs.index(release_frame)
 
@@ -514,7 +654,7 @@ def analyze_action(
         phases["max_external_rotation"] = int(mer)
         sources["max_external_rotation"] = "max_bowling_arm_cocking"
     hip_start = int(ffc) if ffc is not None else int(windup)
-    hip_rot_fr = _detect_hip_rotation(frames, hip_start, release_frame)
+    hip_rot_fr = _detect_hip_rotation(frames, hip_start, release_frame, fps)
     if hip_rot_fr is not None:
         phases["hip_rotation"] = int(hip_rot_fr)
         sources["hip_rotation"] = "peak_2d_hip_shoulder_change"
@@ -547,6 +687,7 @@ def analyze_action(
             "throwing_side": side,
             "bowling_arm_source": "player_profile" if declared else "auto_detected",
             "release_frame": int(release_frame),
+            "peak_wrist_frame": int(peak_wrist_frame),
             "peak_wrist_speed_px_per_frame": float(peak),
             "leave_hand_wrist_speed_px_per_frame": leave_px,
             "phases": phases,

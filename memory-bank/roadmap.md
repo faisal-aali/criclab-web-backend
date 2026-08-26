@@ -62,3 +62,14 @@ High-level features. Detail lives in `tasks/`.
   capture rate, and ball-vs-arm consistency. Compare is same-player ball speed
   only (arm is a separate field). Ball-flight length rejects off-pitch bounces
   instead of clipping them onto the square.
+- **26 Aug 2026 (TASK-008):** Generalisation pass so any upload analyses, not just
+  the clips it was tuned on. Ball tracking and ball *speed* were separated: a
+  validated flight is now kept and drawn even when its geometry cannot support a
+  km/h (previously the whole path was deleted, so clips shot from behind or down
+  the pitch showed no ball at all). Roughly twenty thresholds that were absolute
+  pixels or absolute pixels-per-frame — speed floors, seed radii, wrist-teleport
+  limits, foot-plant descent, hip-rotation rate, candidate size quotas, release
+  and back-projection windows — were re-expressed against body pixel height, the
+  ball's own measured radius, or a real m/s converted through the scale and frame
+  rate. The rightward-throw default was removed. Capture-rate recovery now covers
+  phone super-slow-motion (up to 32x, 960 fps).

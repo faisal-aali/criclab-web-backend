@@ -94,6 +94,28 @@ torso, fence, or a stationary tree is not a ball track: return null + reason.
   extension and a verdict only on a genuinely side-on swing that passes through
   upper-arm-horizontal, and word it as screening — never as a call. A false
   "illegal action" is a far worse failure than an honest `—`.
+- **Finding the ball and quoting its speed are separate questions.** A tracked
+  flight is kept whenever it is a real moving object that left the hand
+  (`view.flight_is_trackable`) — it draws in the overlay, pins release, and feeds
+  the gravity timebase. Whether its direction supports an image-plane km/h is a
+  *second* gate (`view.flight_geometry_ok`), applied in metrics, which refuses the
+  speed with its own reason. Deleting the path because the speed is unmeasurable
+  blanks the ball on every clip filmed from behind or down the pitch.
+- **No threshold in absolute pixels, and none in pixels-per-frame.** A pixel means
+  a different distance at 720p and 4K; a pixel-per-frame means a different *speed*
+  at 30 fps and 240 fps. Scale every gate by something physical:
+  - distances → `body_pixel_height`, the ball's own measured radius
+    (`track._track_ball_r`), `_cricket_r(h, w)`, or the frame diagonal;
+  - speeds → convert a real m/s through `view.min_ball_step_px` (mpp × fps);
+  - durations → seconds × fps, never a frame count.
+  Scaling by frame width alone is not enough — it makes high-frame-rate 4K floors
+  *worse*, because pixels-per-frame falls with the rate while the floor rises with
+  the width. Before the timebase runs, treat the container rate as a lower bound
+  on the capture rate and allow headroom; after it, be exact (`rate_is_certain`).
+- **Never assume which way the delivery travels.** Where the throw direction cannot
+  be measured from pose, skip the downrange filter rather than defaulting to
+  rightward — a default is a camera-setup assumption that discards every real
+  candidate on a clip shot from the other side.
 - **Profile `bowling_arm`** wins over auto side detection.
 
 ## Frontend API contract (sibling repo: criclab-web-frontend)
@@ -172,9 +194,13 @@ PT → **BFC** if the trail ankle plants.
   locks onto the hand (~6 km/h garbage).
 - **4K / high-res:** blob finders and CLAHE run on a working copy whose long
   side is ≤1920 (`detect.collect_flight_candidates`); `x,y,r` are mapped back
-  to original pixels. Optical-flow validation downscales the same way. Pixel
+  to original pixels. Optical-flow validation downscales the same way. Compact
+  radius is ~1% of the short side (a cricket ball, not a forearm). Pixel
   gates (hand exclusion, min step, net travel) scale with frame size so a
-  12 px/frame poster crawl cannot pass as a ball.
+  ~17 px/frame body crawl cannot pass as a ball. Tracking seeds from the
+  throw-peak wrist when refined REL has walked off the arm onto a poster.
+  Ball tracking may walk back one wrist-teleport to seed the hand; it must
+  not rewrite the pose speed series (that moves release and drops FFC / arm km/h).
 - Tracking: seed on the object that has **left the hand** and is moving
   downrange; greedy-chain; refine the dark-blob centroid; **ballistic fit**
   `x(t)=x0+vx·t`, `y(t)=y0+vy·t+a·t²` for release speed (not raw per-frame jumps).

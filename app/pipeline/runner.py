@@ -25,7 +25,7 @@ from app.pipeline import calibrate, extract, pose as pose_mod
 from app.pipeline import metrics as metrics_mod
 from app.pipeline import render as render_mod
 from app.pipeline import timebase, track
-from app.pipeline.view import flight_geometry_ok
+from app.pipeline.view import flight_is_trackable
 from app.services import cloudinary_service
 
 
@@ -100,13 +100,17 @@ async def run_analysis_job(
                 pose_track, bowling_arm=bowling_arm, release_override=leave
             )
 
-        # Keep a lock that would produce a false km/h from ever moving REL.
-        geo_ok, _geo_reason = flight_geometry_ok(ball_track, frame_w, frame_h)
-        # A flight that measurably crosses the image *is* the evidence that this
-        # delivery happens in the image plane — stronger than the pose-based view
-        # guess, which reads a mixed action as front-on. Pose-only clips still
-        # defer to the view classifier inside metrics.
-        if ball_track and not geo_ok:
+        # A track is kept if it is a real flight — an object that left the hand and
+        # kept moving. Whether its direction also supports a km/h is a *separate*
+        # question, answered by flight_geometry_ok inside metrics, which refuses
+        # the speed with its own reason. Deleting the path here because the speed
+        # is unmeasurable would blank the ball in the overlay, unpin release from
+        # the one frame we actually measured, and starve the gravity timebase —
+        # on every clip filmed from behind or down the pitch.
+        real_ok, _real_reason = flight_is_trackable(
+            ball_track, frame_w, frame_h, fps, scale.get("meters_per_pixel")
+        )
+        if ball_track and not real_ok:
             ball_track = []
             if leave is not None:  # release was pinned to a flight we just rejected
                 action = action_mod.analyze_action(pose_track, bowling_arm=bowling_arm)
@@ -250,6 +254,33 @@ def _strip_metric_series(metrics: dict[str, Any]) -> dict[str, Any]:
     return m
 
 
+def _throw_peak_frame(action: dict[str, Any], fps: float) -> int | None:
+    """Wrist-speed peak in the delivery, not a run-up identity flicker."""
+    series = action.get("wrist_speed_series") or []
+    phases = action.get("phases") or {}
+    stored = action.get("peak_wrist_frame")
+    ffc = phases.get("front_foot_contact")
+    mer = phases.get("max_external_rotation")
+    rel = action.get("release_frame")
+    lo = None
+    if ffc is not None:
+        lo = int(ffc) - 4
+    if mer is not None:
+        mer_lo = int(mer) - 4
+        lo = mer_lo if lo is None else max(int(lo), mer_lo)
+    if lo is None and rel is not None:
+        lo = int(rel) - max(20, int(round(float(fps) * 0.25)))
+    if series:
+        cands = [p for p in series if lo is None or int(p.get("frame") or 0) >= int(lo)]
+        if not cands:
+            cands = list(series)
+        best = max(cands, key=lambda p: float(p.get("speed_px") or 0))
+        return int(best["frame"])
+    if stored is not None:
+        return int(stored)
+    return None
+
+
 def _track_ball_seeded(
     video_path: Path,
     meta: dict[str, Any],
@@ -263,48 +294,87 @@ def _track_ball_seeded(
         side = action.get("throwing_side")
         if release is None or not side:
             return []
-        rel = action_mod.frame_by_index(pose_track.get("frames") or [], release)
-        wr = pose_mod.point(rel, f"{side}_wrist") if rel is not None else None
+        fps = float(meta.get("fps") or pose_track.get("fps") or 30.0)
+        frame_w = int(meta.get("width") or pose_track.get("width") or 1280)
+        frame_h = int(meta.get("height") or pose_track.get("height") or 720)
+        frames = pose_track.get("frames") or []
+        peak_fr = _throw_peak_frame(action, fps)
+        track_rel = int(release)
+        max_gap = max(24, min(48, int(round(fps * 0.35))))
+        if peak_fr is not None and abs(int(peak_fr) - int(release)) <= max_gap:
+            # Refined REL often sits a few frames into follow-through, after the
+            # ball has left and (on 4K) after the wrist landmark has jumped to a
+            # wall sticker. The throw-peak is where the hand still holds it.
+            track_rel = int(peak_fr)
+
+        # MediaPipe often parks the bowling wrist on the chest at leave-hand.
+        # Walk back to the last frame the landmark is still on the arm.
+        track_rel, wr = action_mod.last_on_arm_wrist(frames, side, track_rel, frame_h)
+        if wr is None and peak_fr is not None:
+            track_rel, wr = action_mod.last_on_arm_wrist(frames, side, int(peak_fr), frame_h)
+        if wr is None:
+            track_rel, wr = action_mod.last_on_arm_wrist(frames, side, int(release), frame_h)
         if wr is None:
             return []
+
+        rel = action_mod.frame_by_index(frames, track_rel)
         throw_dir = None
         el = pose_mod.point(rel, f"{side}_elbow") if rel is not None else None
         elbow_dir = None
         if el is not None:
             elbow_dir = (float(wr[0] - el[0]), float(wr[1] - el[1]))
             throw_dir = elbow_dir
-        # Pitch direction (lead ankle − trail ankle) is where the ball actually
-        # goes. Elbow→wrist at cocking points at the sky and would filter the
-        # in-air white ball as "not downrange".
         lead = "left" if side == "right" else "right"
-        la = pose_mod.point(rel, f"{lead}_ankle") if rel is not None else None
-        ta = pose_mod.point(rel, f"{side}_ankle") if rel is not None else None
+        # Ankles at FFC show pitch direction more cleanly than at a drifted REL.
+        ffc = (action.get("phases") or {}).get("front_foot_contact")
+        plant_fr = int(ffc) if ffc is not None else int(track_rel)
+        plant = action_mod.frame_by_index(frames, plant_fr)
+        la = pose_mod.point(plant, f"{lead}_ankle") if plant is not None else None
+        ta = pose_mod.point(plant, f"{side}_ankle") if plant is not None else None
         if la is not None and ta is not None:
             pitch = (float(la[0] - ta[0]), float(la[1] - ta[1]))
             if float(np.hypot(pitch[0], pitch[1])) > 12:
                 throw_dir = (pitch[0], min(0.0, pitch[1]) * 0.35)
-        prev = action_mod.frame_by_index(pose_track.get("frames") or [], int(release) - 4)
+        prev = action_mod.frame_by_index(frames, int(track_rel) - 4)
         if prev is not None:
             wr0 = pose_mod.point(prev, f"{side}_wrist")
-            if wr0 is not None:
+            if wr0 is not None and not action_mod._wrist_teleport(
+                frames, side, int(track_rel) - 4, frame_h
+            ):
                 vel = (float(wr[0] - wr0[0]), float(wr[1] - wr0[1]))
-                # Wrist delta wins only if the hand is actually moving into the air
-                # (image Y decreases) *and* has a pitch-wise component.
                 if float(np.hypot(vel[0], vel[1])) > 8 and vel[1] < 4 and abs(vel[0]) > abs(vel[1]) * 0.35:
                     throw_dir = vel
                 elif throw_dir is None and elbow_dir is not None:
                     throw_dir = elbow_dir
-        fps = float(meta.get("fps") or pose_track.get("fps") or 30.0)
+        # Wrist travel through the throw peak — left/right of the pitch, not
+        # the cocking forearm. Skip a 1-frame landmark teleport.
+        if peak_fr is not None:
+            a_i, b_i = int(peak_fr) - 3, int(peak_fr) + 2
+            a = action_mod.frame_by_index(frames, a_i)
+            b = action_mod.frame_by_index(frames, b_i)
+            if a is not None and b is not None:
+                wa = pose_mod.point(a, f"{side}_wrist")
+                wb = pose_mod.point(b, f"{side}_wrist")
+                if (
+                    wa is not None
+                    and wb is not None
+                    and not action_mod._wrist_teleport(frames, side, a_i, frame_h)
+                    and not action_mod._wrist_teleport(frames, side, b_i, frame_h)
+                ):
+                    velp = (float(wb[0] - wa[0]), float(wb[1] - wa[1]))
+                    if float(np.hypot(velp[0], velp[1])) > 16 and abs(velp[0]) > abs(velp[1]) * 0.25:
+                        throw_dir = velp
         return track.track_ball_from_release(
             video_path,
-            release_frame=int(release),
+            release_frame=int(track_rel),
             wrist_xy=(float(wr[0]), float(wr[1])),
             fps=fps,
             meters_per_pixel=scale.get("meters_per_pixel"),
-            frame_w=int(meta.get("width") or pose_track.get("width") or 1280),
-            frame_h=int(meta.get("height") or pose_track.get("height") or 720),
+            frame_w=frame_w,
+            frame_h=frame_h,
             throw_dir=throw_dir,
         )
     except Exception:
         traceback.print_exc()
         return []
+

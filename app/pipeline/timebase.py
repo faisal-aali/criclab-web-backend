@@ -33,7 +33,7 @@ G_MPS2 = 9.81
 RATE_TOL = 0.30
 
 MIN_FPS = 20.0
-MAX_FPS = 600.0
+MAX_FPS = 1200.0
 # Below this the two rates agree inside what the fit can resolve — leave it alone.
 DISAGREE_RATIO = 1.5
 MIN_POINTS = 8
@@ -164,7 +164,11 @@ def _pick_rate(fps_rel: float, fps_mean: float, container_fps: float) -> float |
     """
     upper = fps_mean * 1.05
     best: float | None = None
-    for k in (2, 3, 4, 5, 6, 8, 10):
+    # Phones export super-slow-motion at large whole factors too: 960 fps written
+    # into a 30 fps container is 32x. Stopping at 10 left those clips falling
+    # through to "no rate this file could have come from" and silently keeping
+    # the container rate — the exact failure this module exists to catch.
+    for k in (2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32):
         rate = container_fps * k
         if not (MIN_FPS <= rate <= MAX_FPS) or rate > upper:
             continue
