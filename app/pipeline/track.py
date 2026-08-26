@@ -167,12 +167,22 @@ def track_ball_from_release(
     frame_w: int = 1280,
     frame_h: int = 720,
     throw_dir: tuple[float, float] | None = None,
+    body_segments: dict[int, list[tuple[float, float, float, float]]] | None = None,
+    body_margin: float = 0.0,
 ) -> list[dict[str, Any]]:
     """Track the ball in the air after release, one breakpoint per frame.
 
     Lock onto the object that *leaves* the hand and keeps moving downrange.
     A cricket ball is a small red/white disc; a training/football is a dark oval
     against the sky. We never treat the bowling hand itself as the ball.
+
+    `body_segments` maps a frame index to the bowler's limb and torso segments
+    for that frame, taken from the pose track. Pose runs first precisely so this
+    is available: the single largest source of false ball candidates is the
+    bowler themself — a forearm, a shoulder or a thigh is a fast-moving,
+    ball-sized, ball-coloured blob, and it is what captured the greedy chain
+    before this filter existed. The bowling forearm is deliberately NOT included
+    by the caller, because at release the real ball is still beside it.
     """
     from app.pipeline import detect, extract
 
@@ -228,6 +238,7 @@ def track_ball_from_release(
     turf_below_hand = 100.0 * px
     for idx, bgr in extract.iter_frame_range(video_path, start, end):
         elapsed = max(0, idx - int(release_frame))
+        segs = (body_segments or {}).get(int(idx)) or []
         cands, prev_work_gray = detect.collect_flight_candidates(bgr, prev_work_gray)
         min_hand = min_hand_late if elapsed >= 4 else min_hand_early
         max_r = min(frame_w, frame_h) * 0.065
@@ -256,6 +267,11 @@ def track_ball_from_release(
             if directional:
                 down = (c["x"] - hand_x) * dx + (c["y"] - hand_y) * dy
                 if elapsed >= 4 and down < min_down:
+                    continue
+            # On the bowler's own body. Allowed for the first couple of frames,
+            # where the ball genuinely still overlaps the hand and arm.
+            if elapsed >= 2 and body_margin > 0 and segs:
+                if _near_any_segment(c["x"], c["y"], segs, body_margin + float(c.get("r") or 0)):
                     continue
             filtered.append(c)
         per_frame.append({"frame": int(idx), "candidates": filtered})
@@ -380,6 +396,26 @@ def track_ball_from_release(
     # fps-independent: the path must cross the image (view.flight_geometry_ok)
     # and move with the optical flow (checked above).
     return annotate_frame_motion(best, fps, meters_per_pixel)
+
+
+def _near_any_segment(
+    x: float,
+    y: float,
+    segments: list[tuple[float, float, float, float]],
+    margin: float,
+) -> bool:
+    """Is (x, y) within `margin` of any of these line segments?"""
+    for x1, y1, x2, y2 in segments:
+        vx, vy = x2 - x1, y2 - y1
+        L2 = vx * vx + vy * vy
+        if L2 <= 1e-6:
+            if float(np.hypot(x - x1, y - y1)) <= margin:
+                return True
+            continue
+        t = max(0.0, min(1.0, ((x - x1) * vx + (y - y1) * vy) / L2))
+        if float(np.hypot(x - (x1 + t * vx), y - (y1 + t * vy))) <= margin:
+            return True
+    return False
 
 
 def _track_ball_r(path: list[dict[str, Any]]) -> float:

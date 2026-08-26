@@ -116,6 +116,30 @@ torso, fence, or a stationary tree is not a ball track: return null + reason.
   be measured from pose, skip the downrange filter rather than defaulting to
   rightward — a default is a camera-setup assumption that discards every real
   candidate on a clip shot from the other side.
+- **Pose first, ball second — and the ball search uses the pose.** Pose runs
+  before ball tracking so the bowler's own limbs can be excluded as ball
+  candidates (`runner._body_segments` → `track.track_ball_from_release`). A
+  forearm, shoulder or thigh is a fast, ball-sized, ball-coloured blob and is the
+  single largest source of false locks. The bowling forearm is deliberately left
+  out of the exclusion map: at release the real ball is right beside it.
+- **Cross-validate independently measured quantities, do not just band-check
+  each one.** `metrics._cross_validate` compares things measured by different
+  routes — pose timing against ball timing, hand speed against the arm's angular
+  rate, release height against the bowler's own stature, ball speed against hand
+  speed. Each number can sit inside its own band while together describing a
+  delivery that could not have happened; a wrong frame rate or a lock on the
+  wrong object shows up here as a contradiction. Failing checks lower confidence
+  and are reported — nothing is silently corrected.
+  The wrist-speed-vs-arm-swing check is the strongest of these: the two sides
+  come from different measurement chains, so agreement is real evidence that both
+  the capture rate and the pixel scale are right.
+- **The ball's apparent size measures its recession.** Radius is inversely
+  proportional to distance, so the ratio of ball size at the start of the flight
+  to the end is the ratio of those distances. `timebase._depth_growth` uses that
+  to de-bias the arc-averaged gravity fit, which recovers the capture rate from
+  the *precise* fit instead of the noisy cubic one. Without it the rate could
+  flip between two adjacent multiples (90 vs 120 fps) on a small change in the
+  tracked points.
 - **Profile `bowling_arm`** wins over auto side detection.
 
 ## Frontend API contract (sibling repo: criclab-web-frontend)

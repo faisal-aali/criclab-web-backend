@@ -281,6 +281,59 @@ def _throw_peak_frame(action: dict[str, Any], fps: float) -> int | None:
     return None
 
 
+def _body_segments(
+    pose_track: dict[str, Any],
+    side: str | None,
+) -> tuple[dict[int, list[tuple[float, float, float, float]]], float]:
+    """The bowler's limbs and torso per frame, for excluding them as ball candidates.
+
+    Pose runs before ball tracking so this map exists by the time it is needed.
+    The bowler is the largest source of false ball candidates on any clip — a
+    forearm, shoulder or thigh is a fast-moving, ball-sized, ball-coloured blob,
+    and one of them capturing the chain is how a track ends up measuring the arm
+    instead of the delivery.
+
+    The bowling forearm (elbow to wrist) is deliberately left out: at release the
+    real ball is right beside it, and excluding it would delete the very frames
+    release detection and release speed depend on.
+
+    Returns the map and a margin scaled to the bowler's pixel size, so it means
+    the same thing at 720p and 4K.
+    """
+    frames = pose_track.get("frames") or []
+    other = "left" if side == "right" else "right"
+    pairs = [
+        ("left_shoulder", "right_shoulder"),
+        ("left_hip", "right_hip"),
+        ("left_shoulder", "left_hip"),
+        ("right_shoulder", "right_hip"),
+        (f"{side}_shoulder", f"{side}_elbow") if side else ("left_shoulder", "left_elbow"),
+        (f"{other}_shoulder", f"{other}_elbow"),
+        (f"{other}_elbow", f"{other}_wrist"),
+        ("left_hip", "left_knee"),
+        ("left_knee", "left_ankle"),
+        ("right_hip", "right_knee"),
+        ("right_knee", "right_ankle"),
+    ]
+    segs: dict[int, list[tuple[float, float, float, float]]] = {}
+    heights: list[float] = []
+    for f in frames:
+        out: list[tuple[float, float, float, float]] = []
+        for a, b in pairs:
+            pa = pose_mod.point(f, a)
+            pb = pose_mod.point(f, b)
+            if pa is None or pb is None:
+                continue
+            out.append((float(pa[0]), float(pa[1]), float(pb[0]), float(pb[1])))
+        if out:
+            segs[int(f["frame"])] = out
+        h = pose_mod.body_pixel_height(f)
+        if h:
+            heights.append(float(h))
+    body_px = float(np.median(heights)) if heights else 0.0
+    return segs, max(6.0, 0.035 * body_px)
+
+
 def _track_ball_seeded(
     video_path: Path,
     meta: dict[str, Any],
@@ -364,6 +417,7 @@ def _track_ball_seeded(
                     velp = (float(wb[0] - wa[0]), float(wb[1] - wa[1]))
                     if float(np.hypot(velp[0], velp[1])) > 16 and abs(velp[0]) > abs(velp[1]) * 0.25:
                         throw_dir = velp
+        segs, margin = _body_segments(pose_track, side)
         return track.track_ball_from_release(
             video_path,
             release_frame=int(track_rel),
@@ -373,6 +427,8 @@ def _track_ball_seeded(
             frame_w=frame_w,
             frame_h=frame_h,
             throw_dir=throw_dir,
+            body_segments=segs,
+            body_margin=margin,
         )
     except Exception:
         traceback.print_exc()

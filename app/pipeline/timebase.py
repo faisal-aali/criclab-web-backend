@@ -30,7 +30,10 @@ G_MPS2 = 9.81
 
 # How far a candidate capture rate may sit from the release-plane estimate.
 # The cubic term this estimate rests on is precise to roughly this much.
-RATE_TOL = 0.30
+RATE_TOL = 0.22
+# The cubic-at-release estimate is the fallback centre and carries more noise,
+# so it is allowed a wider window.
+RATE_TOL_CUBIC = 0.34
 
 MIN_FPS = 20.0
 MAX_FPS = 1200.0
@@ -54,6 +57,8 @@ def measure_capture_fps(
     """
     out: dict[str, Any] = {
         "ball_meters_per_pixel": None,
+        "ball_depth_growth": None,
+        "raw_debiased_fps": None,
         "fps": float(container_fps),
         "container_fps": float(container_fps),
         "measured_fps": None,
@@ -114,6 +119,19 @@ def measure_capture_fps(
     out["raw_measured_fps"] = round(fps_rel, 1)
     out["raw_mean_arc_fps"] = round(fps_mean, 1)
 
+    # De-bias the arc estimate with the recession the ball's own size reveals.
+    # fps_arc = fps_true x sqrt(mean depth / release depth), so dividing that
+    # square root out recovers the release-plane rate from the *precise* arc fit
+    # instead of the noisy cubic one. Depth grows roughly linearly along the
+    # flight, so the mean over the arc is the midpoint of start and end.
+    growth = _depth_growth(pts)
+    fps_debiased: float | None = None
+    if growth is not None:
+        depth_avg = (1.0 + growth) / 2.0
+        fps_debiased = fps_mean / float(np.sqrt(depth_avg))
+        out["ball_depth_growth"] = round(growth, 2)
+        out["raw_debiased_fps"] = round(fps_debiased, 1)
+
     if fps_rel / float(container_fps) < DISAGREE_RATIO:
         out["note"] = (
             f"Frame rate {container_fps:.0f} fps from the video file, confirmed against "
@@ -122,7 +140,7 @@ def measure_capture_fps(
         out["ball_meters_per_pixel"] = _ball_scale(a_mean, float(container_fps))
         return out
 
-    used = _pick_rate(fps_rel, fps_mean, float(container_fps))
+    used = _pick_rate(fps_rel, fps_mean, float(container_fps), fps_debiased)
     if used is None:
         out["note"] = (
             f"The ball's fall implies about {fps_rel:.0f} fps, which does not match any rate this "
@@ -146,7 +164,12 @@ def measure_capture_fps(
     return out
 
 
-def _pick_rate(fps_rel: float, fps_mean: float, container_fps: float) -> float | None:
+def _pick_rate(
+    fps_rel: float,
+    fps_mean: float,
+    container_fps: float,
+    fps_debiased: float | None = None,
+) -> float | None:
     """Choose the capture rate the clip could actually have been exported from.
 
     Two measurements, with known and opposite error directions:
@@ -163,6 +186,13 @@ def _pick_rate(fps_rel: float, fps_mean: float, container_fps: float) -> float |
     that is still consistent with the release-plane estimate.
     """
     upper = fps_mean * 1.05
+    # Prefer the size-de-biased estimate as the centre: it inherits the arc fit's
+    # precision while removing that fit's known bias. The cubic stands in when
+    # the ball's radii were unusable, but it is noisy enough that a small shift
+    # in the tracked points could flip the answer between two adjacent
+    # multiples — which is why it is no longer the first choice.
+    centre = fps_debiased if fps_debiased else fps_rel
+    tol = RATE_TOL if fps_debiased else RATE_TOL_CUBIC
     best: float | None = None
     # Phones export super-slow-motion at large whole factors too: 960 fps written
     # into a 30 fps container is 32x. Stopping at 10 left those clips falling
@@ -172,7 +202,7 @@ def _pick_rate(fps_rel: float, fps_mean: float, container_fps: float) -> float |
         rate = container_fps * k
         if not (MIN_FPS <= rate <= MAX_FPS) or rate > upper:
             continue
-        if abs(rate - fps_rel) / fps_rel > RATE_TOL:
+        if abs(rate - centre) / centre > tol:
             continue
         if best is None or rate > best:
             best = rate
@@ -189,6 +219,33 @@ def _flight_points(ball_track: list[dict[str, Any]] | None) -> list[dict[str, An
         return []
     pts = [p for p in ball_track if p.get("source") != "interpolated"]
     return sorted(pts, key=lambda p: int(p["frame"]))
+
+
+def _depth_growth(pts: list[dict[str, Any]]) -> float | None:
+    """How much further from the camera the ball gets across the tracked arc.
+
+    A ball's apparent radius is inversely proportional to its distance, so the
+    ratio of its size at the start of the flight to its size at the end is the
+    ratio of those distances. That is a *direct* measurement of the recession
+    that biases the arc-averaged gravity fit — and it comes from every frame,
+    where the cubic's correction term is a weak signal read off three or four.
+
+    Returns None when the radii cannot support it: motion blur changes apparent
+    size too, so a ratio outside a plausible band is treated as unusable rather
+    than trusted.
+    """
+    rs = [float(p.get("r") or 0.0) for p in pts]
+    if len(rs) < 10 or any(r <= 0 for r in rs):
+        return None
+    k = max(3, len(rs) // 5)
+    r_start = float(np.median(rs[:k]))
+    r_end = float(np.median(rs[-k:]))
+    if r_start <= 0 or r_end <= 0:
+        return None
+    growth = r_start / r_end
+    if not (0.95 <= growth <= 4.0):
+        return None
+    return growth
 
 
 def _quadratic_with_error(ts: np.ndarray, ys: np.ndarray) -> tuple[float, float] | None:

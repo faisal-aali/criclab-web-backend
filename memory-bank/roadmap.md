@@ -73,3 +73,14 @@ High-level features. Detail lives in `tasks/`.
   ball's own measured radius, or a real m/s converted through the scale and frame
   rate. The rightward-throw default was removed. Capture-rate recovery now covers
   phone super-slow-motion (up to 32x, 960 fps).
+- **26 Aug 2026 (TASK-009):** Finding the ball and quoting its speed were split
+  apart, so clips filmed from behind or down the pitch now track and draw the
+  ball instead of showing none. Pose informs the ball search — the bowler's own
+  limbs are excluded as candidates. Capture-rate recovery stopped flipping
+  between adjacent multiples by measuring the ball's recession from its apparent
+  size rather than reading it off a noisy cubic term, and now covers phone
+  super-slow-motion up to 32x. Added cross-validation between independently
+  measured quantities (pose timing, ball timing, hand speed vs arm-swing rate,
+  release height vs stature); failing checks lower confidence and are reported.
+  Roughly twenty absolute-pixel / pixel-per-frame thresholds were re-expressed
+  against body size, ball size or a real m/s.

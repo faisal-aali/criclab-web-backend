@@ -18,6 +18,8 @@ Formulas (image plane; reject rather than clamp):
 
 from __future__ import annotations
 
+import math
+
 from typing import Any
 
 import numpy as np
@@ -439,6 +441,116 @@ def _elbow_extension_range(
         out["note"] = (
             f"Elbow straightens about {extension:.0f}° from upper-arm-horizontal to release, well "
             f"inside the ICC {CHUCK_LIMIT_DEG:.0f}° limit." + tail
+        )
+    return out
+
+
+
+# Physically plausible bands for a bowled delivery. These are cross-checks
+# between independently measured quantities, not gates on any single one — a
+# metric can be individually in range and still be impossible alongside its
+# neighbours, and that is what these catch.
+COHERENCE_BANDS: dict[str, tuple[float, float, str]] = {
+    "ffc_to_release_ms": (55.0, 400.0, "Front-foot contact to release"),
+    "bfc_to_ffc_ms": (60.0, 500.0, "Back-foot to front-foot contact"),
+    "ball_over_arm_ratio": (1.0, 2.4, "Ball speed vs bowling-hand speed"),
+    "release_height_over_stature": (0.70, 1.55, "Release height vs the bowler's own height"),
+    "wrist_speed_vs_arm_swing": (0.45, 2.2, "Hand speed vs arm-swing rate"),
+}
+
+
+def _cross_validate(
+    *,
+    phases: dict[str, Any],
+    fps: float,
+    ball_kmh: float | None,
+    arm_kmh: float | None,
+    release_height_m: float | None,
+    stature_m: float | None,
+    arm_swing_deg_s: float | None,
+    arm_length_m: float | None,
+) -> dict[str, Any]:
+    """Check the measurements against each other, not just against their own bands.
+
+    Each headline number is already gated on its own plausibility. That is not
+    enough: a release time, an arm speed and a ball speed can each sit inside a
+    sensible range while describing a delivery that could not have happened. The
+    checks here compare quantities that were measured *independently* — pose
+    timing against ball timing, hand speed against the arm's angular rate,
+    release height against the bowler's own stature — so a wrong frame rate, a
+    mis-detected event or a lock on the wrong object shows up as a contradiction
+    rather than a plausible-looking figure.
+
+    Nothing is corrected here. Failing checks are reported so the caller can
+    lower confidence and say what disagreed.
+    """
+    checks: list[dict[str, Any]] = []
+
+    def _add(key: str, value: float | None, *, detail: str = "") -> None:
+        if value is None:
+            return
+        lo, hi, label = COHERENCE_BANDS[key]
+        ok = lo <= value <= hi
+        checks.append({
+            "check": key,
+            "label": label,
+            "value": round(float(value), 2),
+            "expected": [lo, hi],
+            "ok": ok,
+            "detail": detail,
+        })
+
+    def _gap_ms(a: str, b: str) -> float | None:
+        fa, fb = phases.get(a), phases.get(b)
+        if fa is None or fb is None:
+            return None
+        return (int(fb) - int(fa)) / max(float(fps), 1e-6) * 1000.0
+
+    _add("ffc_to_release_ms", _gap_ms("front_foot_contact", "release"),
+         detail="Timing from the pose track, divided by the capture rate")
+    _add("bfc_to_ffc_ms", _gap_ms("back_foot_contact", "front_foot_contact"),
+         detail="Delivery-stride duration from the pose track")
+
+    if ball_kmh is not None and arm_kmh:
+        _add("ball_over_arm_ratio", float(ball_kmh) / float(arm_kmh),
+             detail="Ball speed comes from the flight, hand speed from the pose track")
+
+    if release_height_m is not None and stature_m:
+        _add("release_height_over_stature", float(release_height_m) / float(stature_m),
+             detail="Release height against the stature used to scale the image")
+
+    # The wrist rides the arm: its speed should be the arm's angular rate times
+    # the arm's length. Both sides are measured separately, so agreement is real
+    # evidence the capture rate and the pixel scale are right.
+    if arm_swing_deg_s and arm_length_m:
+        implied_mps = math.radians(float(arm_swing_deg_s)) * float(arm_length_m)
+        if implied_mps > 0.1 and arm_kmh:
+            _add("wrist_speed_vs_arm_swing", (float(arm_kmh) / 3.6) / implied_mps,
+                 detail=f"Arm swing implies about {implied_mps * 3.6:.0f} km/h at the hand")
+
+    failed = [c for c in checks if not c["ok"]]
+    out: dict[str, Any] = {
+        "checks": checks,
+        "passed": len(checks) - len(failed),
+        "total": len(checks),
+        "ok": not failed if checks else None,
+        "failed": [c["check"] for c in failed],
+        "note": None,
+    }
+    if not checks:
+        out["note"] = "Not enough independent measurements on this clip to cross-check them"
+    elif failed:
+        first = failed[0]
+        out["note"] = (
+            f"{len(failed)} of {len(checks)} cross-checks disagree — "
+            f"{first['label'].lower()} came out at {first['value']}, outside the "
+            f"{first['expected'][0]}-{first['expected'][1]} a real delivery sits in. "
+            "Treat the affected numbers as indicative and re-film square-on in good light."
+        )
+    else:
+        out["note"] = (
+            f"All {len(checks)} cross-checks agree — timing, speeds and geometry describe "
+            "one consistent delivery"
         )
     return out
 
@@ -1199,6 +1311,38 @@ def compute_metrics(
                 "beyond the wrist on the same arm"
             )
 
+    # --- Cross-validation across independently measured quantities ---
+    # The arm's in-plane length at release, converted to metres, lets the wrist's
+    # measured speed be checked against the arm's measured angular rate — two
+    # numbers that came from different places and must agree.
+    arm_len_m: float | None = None
+    if rel_pose is not None and side and mpp and calibrated:
+        px_len = _arm_inplane_length(rel_pose, side)
+        if px_len > 0:
+            arm_len_m = float(px_len) * float(mpp)
+            if not (0.35 <= arm_len_m <= 1.05):
+                arm_len_m = None  # foreshortened at release; not a usable lever arm
+
+    cross_validation = _cross_validate(
+        phases=phases,
+        fps=fps,
+        ball_kmh=ball_speed_kmh,
+        arm_kmh=arm_speed_kmh,
+        release_height_m=release_height_m,
+        stature_m=height_m,
+        arm_swing_deg_s=arm_swing,
+        arm_length_m=arm_len_m,
+    )
+    # A measurement contradicted by its neighbours is not trustworthy just
+    # because it sits inside its own band. Lower the confidence of what the
+    # failing checks touch, and say so in the note rather than silently.
+    if cross_validation.get("failed"):
+        failed = set(cross_validation["failed"])
+        if {"ball_over_arm_ratio"} & failed:
+            ball_conf = min(ball_conf, 0.3)
+        if {"wrist_speed_vs_arm_swing", "ffc_to_release_ms"} & failed:
+            speed_conf = min(speed_conf, 0.35)
+
     # --- Action legality (chuck screening) and pace band ---
     legality = _elbow_extension_range(
         frames, side or "right", phases, release_frame,
@@ -1352,6 +1496,7 @@ def compute_metrics(
             "status": "ok" if legality["verdict"] is not None else "unavailable",
         },
         "speed_consistency": speed_consistency,
+        "cross_validation": cross_validation,
         "ball_speed_scale_basis": ball_scale_basis,
         "ball_depth_ratio": ball_depth_ratio,
         "delivery_type": {
