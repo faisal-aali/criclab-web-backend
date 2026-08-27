@@ -173,6 +173,52 @@ torso, fence, or a stationary tree is not a ball track: return null + reason.
 - **Guards hide UI; the API enforces access.** Every handler scopes to the caller
   by putting `user_id` in the query filter — never trusting a client-supplied id.
 
+## Support, coaching and the assistant
+
+- **Ownership is a query filter, not a check.** Every user-facing ticket and
+  booking handler puts `user_id` in the Mongo filter itself; a valid id
+  belonging to someone else returns 404, the same answer as a bad id — never a
+  403 that would confirm the id exists.
+- **Double-booking is prevented by the unique index, not by application logic.**
+  `available_slots()` is computed fresh from weekly availability windows minus
+  live bookings; it is a read, not a reservation. The unique partial index on
+  `(coach_id, starts_at)` filtered to `pending|confirmed` is what actually stops
+  two people taking the same slot — `create_booking` inserts and lets Mongo
+  reject the loser, rather than checking-then-inserting and racing.
+- **Reschedule books the new slot before releasing the old one.** If the new
+  insert fails (someone else took it), the original booking is untouched. The
+  reverse order would lose the slot the person already had.
+- **Ticket status is derived from who spoke last**, not set by hand: a user
+  reply moves it to `awaiting_support`, a staff reply to `awaiting_user`.
+  Nothing needs to remember to update it, so it cannot drift from the thread.
+- **Uploaded attachments are trusted by neither name nor extension.** The
+  filename is a display label only; the file is written to a server-chosen path
+  under a server-chosen id, and its type is decided by the declared
+  content-type against an allow-list, not by trusting either the name or the
+  claimed type alone. Served back with `X-Content-Type-Options: nosniff` so a
+  disguised upload cannot be rendered inline as HTML.
+- **The assistant is grounded, not instructed to be honest.** Three independent
+  layers, not one: (1) retrieval hands it only passages from
+  `app/assistant/knowledge/*.md` — there is no internal documentation in that
+  corpus for it to leak; (2) a question *about* CricLab's own implementation is
+  pattern-matched and refused before it ever reaches the model; (3) the
+  generated answer is scanned for a denylist of implementation terms and
+  discarded — not trimmed — if one appears, since a model told not to say
+  something is not the same as a model that structurally cannot.
+- **Retrieval relevance needs two thresholds, not one.** A general-purpose
+  embedding model does not put unrelated text near zero cosine similarity — two
+  sentences with nothing in common still score around 0.45. Similarity is
+  rescaled onto the band that actually carries signal before any cutoff is
+  applied, and the *best* passage must additionally clear a higher bar than the
+  rest (`MIN_TOP_RELEVANCE`), or the whole result set is discarded. Four weak
+  passages are not evidence of relevance; they are four ways to answer the
+  wrong question. Caught during build by "what is the airspeed of a swallow?"
+  getting back a confident paragraph about ball speed.
+- **Retrieval degrades to term overlap, not to an error**, when the local
+  embedding model is unreachable — a support assistant that stops answering
+  because a model is down is worse than one that answers a little less
+  precisely.
+
 ## Frontend API contract (sibling repo: criclab-web-frontend)
 
 UI lives in `../criclab-web-frontend`. Backend must keep this contract stable:

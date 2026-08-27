@@ -1,7 +1,7 @@
 # TASK-010 — Accounts platform: auth, email, notifications
 
 **Feature:** FEAT-020 (auth), FEAT-021 (email), FEAT-022 (notifications)
-**Status:** Done (auth + email + notifications). Support / coaching / assistant not started.
+**Status:** Done. Support, coaching and the assistant were completed separately — see TASK-011.
 **Priority:** P0
 **Date:** 26 Aug 2026
 

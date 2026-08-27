@@ -97,3 +97,14 @@ High-level features. Detail lives in `tasks/`.
   limiting, a security audit trail, branded transactional email over SMTP, and an
   in-app notification centre. Three real bugs were caught by the end-to-end suite
   — see TASK-010. Support, coaching and the assistant are not built.
+- **27 Aug 2026 (TASK-011):** Support ticketing, coaching bookings and the RAG
+  assistant — the three modules TASK-010 left unbuilt. Support: threaded
+  tickets with attachments, status derived from who spoke last, staff queue,
+  readable references (`CL-XXXXXX`). Coaching: availability computed on demand
+  from weekly windows rather than materialised, double-booking prevented by the
+  existing unique `(coach, slot)` index rather than a check-then-insert, cancel
+  and reschedule with a 12h window. Assistant: retrieval-augmented, grounded
+  only in `app/assistant/knowledge/*.md`, refuses questions about CricLab's own
+  implementation before they reach the model, and strips the answer if a
+  disallowed term leaks through anyway. See TASK-011 for the two real bugs the
+  build caught.
