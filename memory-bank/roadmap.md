@@ -135,3 +135,24 @@ High-level features. Detail lives in `tasks/`.
   Admin frontend is now wired: six pages under `/admin/*` (`RequireAdmin` +
   `AdminLayout`), AccountMenu entry for `role === 'admin'`. Coach CRUD UI and
   booking calendar remain deferred — see TASK-012.
+- **27 Aug 2026 (TASK-013):** Ball-speed accuracy and overlay legibility.
+  Reported as "shows 100 km/h, should be ~131". Investigated against the real
+  4K/120 clip rather than tuning the display: **neither number was right — the
+  true image-plane release speed is 86 km/h**, and both wrong numbers came from
+  the same root cause. The ball's vertical pixel track is noise at 4K (the
+  detector's centroid slides along a 100+ px motion-blur streak), `hypot(dx,dy)`
+  cannot distinguish that from real motion, and every frame reporting 130+ km/h
+  was a y-spike — including the 132 the overlay was printing beside the ball
+  while the panel said 100. Replaced the old two-estimator agreement check
+  (which could not work: both estimators consumed the same corrupted signal, so
+  agreeing meant nothing) with one physics-constrained robust fit — gravity
+  pinned to `g/(mpp·fps²)`, Theil–Sen slopes, interpolated points excluded, and
+  a quality gate that refuses rather than guesses. The gate immediately caught a
+  second delivery that had been confidently displaying 63.24 km/h off a track
+  whose fitted horizontal velocity was *negative*. Overlays are now alpha-blended
+  and roughly half their previous width, and the per-frame ball label was
+  replaced with the one measured release speed so a single frame can no longer
+  contradict itself. Full reproducibility trail logged under `criclab.metrics`.
+  **Not done:** the follow-up request for 120→30 fps slow-motion playback,
+  auto-generated breakpoints with frame/timestamp/confidence, and player speed
+  controls — see TASK-013 for what that needs.

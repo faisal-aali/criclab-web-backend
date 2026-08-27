@@ -18,20 +18,26 @@ Formulas (image plane; reject rather than clamp):
 
 from __future__ import annotations
 
+import logging
 import math
 
 from typing import Any
 
 import numpy as np
 
+log = logging.getLogger("criclab.metrics")
+
 from app.pipeline import pose as posemod
 from app.pipeline.action import frame_by_index
-from app.pipeline.track import ballistic_release_speed_px_per_frame, flight_release_speed_px_per_frame
+from app.pipeline import track as ball_track_mod
 from app.pipeline.view import classify_camera_view, flight_geometry_ok
 
 MIN_PLAUSIBLE_KMH = 25.0
 MAX_PLAUSIBLE_KMH = 160.0
 MIN_PLAUSIBLE_BALL_KMH = 25.0
+# Below this, the physics-constrained fit did not describe the tracked points
+# well enough to stand behind a number. Refuse rather than display.
+MIN_BALL_FIT_QUALITY = 0.25
 
 PHASE_ORDER = [
     "back_foot_contact",
@@ -51,33 +57,6 @@ PHASE_LABELS = {
     "release": "Release",
     "follow_through": "Follow-through",
 }
-
-
-def _robust_ball_kmh(speeds: list[float], fps: float) -> float | None:
-    """Median per-frame flight speed over the first ~0.12 s, spikes dropped.
-
-    This is a cross-check on the fitted release speed, never the reported value,
-    so it has to describe the same instant the fit describes. A window measured
-    in seconds rather than samples does that at any frame rate: on a long
-    120 fps flight it covers the opening third, where the ball is still near its
-    release plane; on a short 200 fps flight it spans the whole path, so a
-    detector alternating between the ball and a blob beside it averages out
-    instead of biasing one end.
-
-    Taken over the whole flight instead, it would read far below a correct fit
-    on any receding delivery — pixel speed decays as the ball goes downrange —
-    and would veto good measurements.
-    """
-    clean = [float(s) for s in speeds if s is not None]
-    if not clean:
-        return None
-    span = max(6, int(round(float(fps) * 0.12))) if fps and fps > 1 else 12
-    window = clean[: min(span, len(clean))]
-    med = float(np.median(window))
-    kept = [s for s in window if 0.4 * med <= s <= 2.2 * med]
-    if len(kept) >= 3:
-        return float(np.median(kept))
-    return med
 
 
 def _metric(
@@ -852,83 +831,111 @@ def compute_metrics(
         ball_note = geo_reason
         ball_status = "unavailable"
     elif ball_track and len(ball_track) >= 4:
-        frame_kmh = [float(p["speed_kmh"]) for p in ball_track if p.get("speed_kmh") is not None]
-        ball_px = ballistic_release_speed_px_per_frame(ball_track, fps)
-        if ball_px is None:
-            ball_px = flight_release_speed_px_per_frame(ball_track)
-        if frame_kmh or (ball_px and ball_px > 0):
-            if not mpp or not calibrated:
-                ball_note = scale_note or "Ball tracked — enter bowler height to convert to km/h"
+        # Release speed comes from one physics-constrained robust fit, not from
+        # reconciling two estimators that measure different things. The old path
+        # blended a quadratic endpoint-derivative against the median of raw
+        # per-frame `hypot(dx, dy)` — and because `dy` is where the detector's
+        # noise lives (see `robust_release_velocity_px_per_frame`), both inputs
+        # and therefore the blend were inflated by it. On the clip this was
+        # rewritten for that produced 100 km/h against a true 86.
+        if not mpp or not calibrated:
+            ball_note = scale_note or "Ball tracked — enter bowler height to convert to km/h"
+            ball_status = "unavailable"
+        else:
+            b_kmh = None
+            b_mps = None
+            # Release speed is read off the first frames of flight, where the
+            # ball is still at the bowler's own distance from the camera — the
+            # plane the height scale calibrates. The ball's own gravity-derived
+            # scale describes where it ends up, not where it left the hand, and
+            # is carried as a diagnostic only.
+            ball_mpp = (timebase_info or {}).get("ball_meters_per_pixel")
+            depth_ratio = (ball_mpp / mpp) if (ball_mpp and mpp) else None
+            use_mpp, scale_basis = mpp, "bowler_height_plane"
+
+            ball_fit = ball_track_mod.robust_release_velocity_px_per_frame(
+                ball_track, fps, use_mpp, release_frame=action.get("release_frame")
+            )
+            if ball_fit:
+                ball_px = float(ball_fit["speed_px_per_frame"])
+                b_mps = ball_px * use_mpp * fps
+                b_kmh = b_mps * 3.6
+
+            if ball_fit is None:
+                ball_note = "Ball path too short or too broken to fit a release speed"
                 ball_status = "unavailable"
-            else:
+            elif ball_fit["quality"] < MIN_BALL_FIT_QUALITY:
+                # An honest "could not measure" beats a confident wrong number.
                 b_kmh = None
                 b_mps = None
-                # Release speed is read off the first frames of flight, and in
-                # those frames the ball has only just left the hand — it is still
-                # at the bowler's own distance from the camera, which is exactly
-                # the plane the height scale calibrates. So the body scale is the
-                # right one here. The ball's own gravity-derived scale, averaged
-                # over the whole arc, describes where it ends up, not where it
-                # was released, and is carried as a diagnostic only.
-                ball_mpp = (timebase_info or {}).get("ball_meters_per_pixel")
-                depth_ratio = (ball_mpp / mpp) if (ball_mpp and mpp) else None
-                use_mpp, scale_basis = mpp, "bowler_height_plane"
-                if ball_px and ball_px > 0:
-                    b_mps = ball_px * use_mpp * fps
-                    b_kmh = b_mps * 3.6
-                if frame_kmh:
-                    robust = _robust_ball_kmh(frame_kmh, fps)
-                    if b_kmh is None:
-                        b_kmh = robust
-                        b_mps = b_kmh / 3.6 if b_kmh is not None else None
-                    elif robust is not None and robust > 0:
-                        rel_err = abs(b_kmh - robust) / robust
-                        if rel_err > 0.35:
-                            # Disagreeing fits mean the lock is untrustworthy — do not pick one.
-                            b_kmh = None
-                            b_mps = None
-                            ball_note = (
-                                "Ball-speed estimators disagree — not reporting a number that could be false"
-                            )
-                        elif rel_err <= 0.25:
-                            b_kmh = 0.70 * b_kmh + 0.30 * robust
-                            b_mps = b_kmh / 3.6
-                ball_raw = b_kmh
-                if b_kmh is None:
-                    ball_note = ball_note or "Ball path too short to measure speed"
-                    ball_status = "unavailable"
-                elif b_kmh > MAX_PLAUSIBLE_KMH:
-                    ball_note = (
-                        f"Tracked path gave {b_kmh:.0f} km/h — not a realistic cricket ball speed "
-                        "(likely the wrong blob). Re-film side-on with the ball clearly leaving the hand."
+                ball_note = (
+                    "The tracked ball positions do not fit a real flight path closely enough to "
+                    "quote a speed — the detector likely lost the ball or locked onto something "
+                    "else. Re-film side-on with the ball clearly visible after release."
+                )
+                ball_status = "unavailable"
+                ball_conf = 0.08
+            ball_raw = b_kmh
+
+            # Reproducibility trail. Logged from the same values the metric is
+            # built from — not recomputed — so it can never describe a different
+            # calculation than the one that produced the displayed number.
+            if ball_fit:
+                _k = use_mpp * fps * 3.6
+                _first = ball_fit["first_frame"]
+                log.info(
+                    "ball-speed | fps=%.3f mpp=%.7f g_px=%.4f/frame^2 | "
+                    "release_frame=%s release_t=%.4fs fit_window=%s-%s "
+                    "points_used=%d dropped=%d | resid x=%.1fpx y=%.1fpx | "
+                    "vx=%.2f vy=%.2f |v|=%.2f px/frame | "
+                    "vx=%.1f vy=%.1f release_speed=%.1f km/h | quality=%.2f -> %s",
+                    fps, use_mpp, ball_fit["gravity_px_per_frame2"],
+                    action.get("release_frame"), (action.get("release_frame") or 0) / max(fps, 1e-6),
+                    _first, ball_fit["last_frame"],
+                    ball_fit["points_used"], ball_fit["points_dropped"],
+                    ball_fit["x_residual_px"], ball_fit["y_residual_px"],
+                    ball_fit["vx_px_per_frame"], ball_fit["vy_px_per_frame"],
+                    ball_fit["speed_px_per_frame"],
+                    ball_fit["vx_px_per_frame"] * _k, ball_fit["vy_px_per_frame"] * _k,
+                    ball_fit["speed_px_per_frame"] * _k, ball_fit["quality"],
+                    "REPORTED" if b_kmh is not None else "REFUSED (low quality)",
+                )
+
+            if b_kmh is None:
+                ball_note = ball_note or "Ball path too short to measure speed"
+                ball_status = "unavailable"
+            elif b_kmh > MAX_PLAUSIBLE_KMH:
+                ball_note = (
+                    f"Tracked path gave {b_kmh:.0f} km/h — not a realistic cricket ball speed "
+                    "(likely the wrong blob). Re-film side-on with the ball clearly leaving the hand."
+                )
+                ball_status = "unavailable"
+                ball_conf = 0.08
+            elif b_kmh < MIN_PLAUSIBLE_BALL_KMH:
+                ball_note = (
+                    f"Tracked path gave {b_kmh:.1f} km/h — too slow to be release speed. "
+                    "The ball may be out of view or lost after release."
+                )
+                ball_status = "unavailable"
+                ball_conf = 0.08
+            else:
+                ball_speed_mps, ball_speed_kmh = b_mps, b_kmh
+                ball_status = "ok"
+                ball_conf = min(0.8, 0.35 + 0.04 * len(ball_track) + scale_conf * 0.25)
+                ball_note = (
+                    "Release speed measured over the first frames after the ball leaves the hand, "
+                    "where it is still at your own distance from the camera. This is the speed "
+                    "across the image only — a single camera cannot see how fast the ball also "
+                    "travels away from the lens, so on anything but a square-on view the true "
+                    "release speed is higher than this. Not a radar gun."
+                )
+                if depth_ratio and depth_ratio > 1.15:
+                    ball_note += (
+                        f" On this clip the ball recedes to about {depth_ratio:.1f}x its release "
+                        "distance during the tracked flight, so expect a real gap."
                     )
-                    ball_status = "unavailable"
-                    ball_conf = 0.08
-                elif b_kmh < MIN_PLAUSIBLE_BALL_KMH:
-                    ball_note = (
-                        f"Tracked path gave {b_kmh:.1f} km/h — too slow to be release speed. "
-                        "The ball may be out of view or lost after release."
-                    )
-                    ball_status = "unavailable"
-                    ball_conf = 0.08
-                else:
-                    ball_speed_mps, ball_speed_kmh = b_mps, b_kmh
-                    ball_status = "ok"
-                    ball_conf = min(0.8, 0.35 + 0.04 * len(ball_track) + scale_conf * 0.25)
-                    ball_note = (
-                        "Release speed measured over the first frames after the ball leaves the hand, "
-                        "where it is still at your own distance from the camera. This is the speed "
-                        "across the image only — a single camera cannot see how fast the ball also "
-                        "travels away from the lens, so on anything but a square-on view the true "
-                        "release speed is higher than this. Not a radar gun."
-                    )
-                    if depth_ratio and depth_ratio > 1.15:
-                        ball_note += (
-                            f" On this clip the ball recedes to about {depth_ratio:.1f}x its release "
-                            "distance during the tracked flight, so expect a real gap."
-                        )
-                    ball_scale_basis = scale_basis
-                    ball_depth_ratio = depth_ratio
+                ball_scale_basis = scale_basis
+                ball_depth_ratio = depth_ratio
     else:
         ball_note = "Ball flight not tracked — use a side-on clip with a visible red or white ball after release"
 
