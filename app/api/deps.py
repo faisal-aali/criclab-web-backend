@@ -111,6 +111,22 @@ async def admin_user(user: CurrentUser) -> dict[str, Any]:
 AdminUser = Annotated[dict[str, Any], Depends(admin_user)]
 
 
+def visible_to(user: dict[str, Any], owner_id: str | None, *, exists: bool) -> bool:
+    """Whether this caller may see a resource.
+
+    A regular user is told 404 both when the row is missing and when it
+    belongs to someone else — probing ids must not reveal that a delivery
+    exists. Staff may read any row that exists, including pre-launch data
+    that was never attributed (`user_id` absent).
+    """
+    if not exists:
+        return False
+    if user.get("role") == "admin":
+        return True
+    return owner_id == user["_id"]
+
+
+
 async def optional_user(
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any] | None:

@@ -56,5 +56,32 @@ async def list_deliveries(
     return await cursor.to_list(length=limit)
 
 
+async def top_throws(limit: int = 20) -> list[dict[str, Any]]:
+    """Fastest Action deliveries with a measured (not estimated) ball speed."""
+    pipeline: list[dict[str, Any]] = [
+        {
+            "$match": {
+                "metrics.ball_speed_kmh.status": "ok",
+                "metrics.ball_speed_kmh.value": {"$gt": 0},
+            }
+        },
+        {"$sort": {"metrics.ball_speed_kmh.value": -1, "created_at": 1}},
+        {"$limit": limit},
+        {
+            "$project": {
+                "_id": 1,
+                "user_id": 1,
+                "player_name": 1,
+                "created_at": 1,
+                "metrics.ball_speed_kmh": 1,
+                "metrics.arm_speed_kmh": 1,
+                "metrics.delivery_type": 1,
+                "metrics.player_profile": 1,
+            }
+        },
+    ]
+    return await get_db().deliveries.aggregate(pipeline).to_list(limit)
+
+
 async def get_video(video_id: str) -> dict[str, Any] | None:
     return await get_db().videos.find_one({"_id": video_id})

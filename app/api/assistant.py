@@ -83,7 +83,14 @@ async def ask_stream(payload: AskIn, user: OptionalUser, client: Client):
         ):
             yield json.dumps(event) + "\n"
 
-    return StreamingResponse(events(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        events(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/reindex", status_code=status.HTTP_202_ACCEPTED)

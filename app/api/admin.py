@@ -14,10 +14,18 @@ action in the app uses — see `log_security_event`.
 
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from app.api.deps import AdminUser, Client
+from app.coaching.recommend import (
+    load_catalog,
+    parse_youtube_id,
+    save_catalog,
+    slugify_drill_id,
+)
 from app.db import auth_repo
 from app.services import admin_service as svc
 
@@ -65,6 +73,14 @@ async def get_user(user_id: str, _: AdminUser):
     return detail
 
 
+@router.get("/users/{user_id}/history")
+async def user_history(user_id: str, _: AdminUser):
+    history = await svc.user_history(user_id)
+    if not history:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    return history
+
+
 class UserStatusIn(BaseModel):
     disabled: bool
 
@@ -102,6 +118,114 @@ async def list_analyses(
     return await svc.list_analyses(
         pipeline=pipeline, status=status_filter, search=search, page=page, page_size=page_size
     )
+
+
+# --------------------------------------------------------------------------- #
+# Drill library
+# --------------------------------------------------------------------------- #
+
+class DrillIn(BaseModel):
+    title: str = Field(min_length=3, max_length=140)
+    youtube_id: str = Field(min_length=8, max_length=240)
+    tags: list[str] = Field(default_factory=list, max_length=12)
+    id: str | None = Field(default=None, max_length=48)
+
+
+def _unique_drill_id(wanted: str, taken: set[str]) -> str:
+    base = wanted if re.fullmatch(r"[a-z][a-z0-9_]{1,47}", wanted) else slugify_drill_id(wanted)
+    candidate = base
+    n = 2
+    while candidate in taken:
+        candidate = f"{base}_{n}"[:48]
+        n += 1
+    return candidate
+
+
+@router.get("/drills")
+def list_drills(_: AdminUser):
+    items = load_catalog()
+    return {"items": items, "tags": sorted({t for d in items for t in d.get("tags") or []})}
+
+
+@router.post("/drills", status_code=status.HTTP_201_CREATED)
+async def create_drill(payload: DrillIn, admin: AdminUser, client: Client):
+    items = list(load_catalog())
+    taken = {d["id"] for d in items}
+    drill_id = _unique_drill_id((payload.id or slugify_drill_id(payload.title)).lower(), taken)
+    try:
+        youtube_id = parse_youtube_id(payload.youtube_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    items.append(
+        {
+            "id": drill_id,
+            "youtube_id": youtube_id,
+            "title": payload.title.strip(),
+            "tags": payload.tags,
+        }
+    )
+    try:
+        saved = save_catalog(items)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    await auth_repo.log_security_event(
+        user_id=admin["_id"],
+        event="admin_drill_created",
+        ip=client.ip,
+        user_agent=client.user_agent,
+        detail=f"drill={drill_id}",
+    )
+    return {"item": next(d for d in saved if d["id"] == drill_id)}
+
+
+@router.put("/drills/{drill_id}")
+async def update_drill(drill_id: str, payload: DrillIn, admin: AdminUser, client: Client):
+    items = list(load_catalog())
+    idx = next((i for i, d in enumerate(items) if d["id"] == drill_id), None)
+    if idx is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Drill not found")
+    try:
+        youtube_id = parse_youtube_id(payload.youtube_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    items[idx] = {
+        "id": drill_id,
+        "youtube_id": youtube_id,
+        "title": payload.title.strip(),
+        "tags": payload.tags,
+    }
+    try:
+        saved = save_catalog(items)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    await auth_repo.log_security_event(
+        user_id=admin["_id"],
+        event="admin_drill_updated",
+        ip=client.ip,
+        user_agent=client.user_agent,
+        detail=f"drill={drill_id}",
+    )
+    return {"item": next(d for d in saved if d["id"] == drill_id)}
+
+
+@router.delete("/drills/{drill_id}")
+async def delete_drill(drill_id: str, admin: AdminUser, client: Client):
+    items = list(load_catalog())
+    kept = [d for d in items if d["id"] != drill_id]
+    if len(kept) == len(items):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Drill not found")
+    try:
+        save_catalog(kept)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    await auth_repo.log_security_event(
+        user_id=admin["_id"],
+        event="admin_drill_deleted",
+        ip=client.ip,
+        user_agent=client.user_agent,
+        detail=f"drill={drill_id}",
+    )
+    return {"status": "deleted", "id": drill_id}
 
 
 # --------------------------------------------------------------------------- #

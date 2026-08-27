@@ -35,7 +35,7 @@ MAX_QUESTION_CHARS = 800
 MAX_HISTORY_TURNS = 6
 # Someone is watching a typing indicator. Past this it is better to answer
 # from the passages directly than to keep them waiting.
-GENERATION_TIMEOUT_S = 25.0
+GENERATION_TIMEOUT_S = 40.0
 STREAM_TIMEOUT_S = 45.0
 # How much streamed text to buffer before it is scanned and flushed to the
 # client. Smaller means a more immediate-feeling stream; larger means the
@@ -52,14 +52,17 @@ STREAM_FLUSH_CHARS = 48
 # forgotten passwords and untracked balls, because the model latched onto the
 # one example shown in the instructions rather than picking per the question.
 PAGE_LINKS: list[tuple[str, str, str]] = [
-    ("Video Analysis", "/app", "uploading a clip, starting a new analysis"),
+    ("Video Analysis", "/app", "uploading a clip, starting a new Action analysis"),
     ("Ball Flight", "/app/ball-flight", "line, length or ball-flight specific analysis"),
     ("Analytics / History", "/app/history", "past sessions, comparing deliveries over time"),
+    ("Leaderboard", "/app/leaderboard", "top throws, fastest ball speed, ranking"),
     ("Drill Library", "/app/train", "practice drills"),
     ("Coaching", "/app/coaching", "booking, rescheduling or cancelling a coach session"),
     ("Support", "/app/support", "reporting a problem, a ticket, something not working"),
     ("Account Settings", "/app/settings", "password, profile, email, signed-in devices"),
-    ("Filming Guide", "/record", "how to film a clip"),
+    ("Filming Guide", "/record", "how to film a clip that CricLab can read"),
+    ("How it works", "/how-it-works", "a first overview of the product"),
+    ("Features", "/features", "what CricLab can measure"),
     ("Help / FAQ", "/faq", "a general question this table does not otherwise cover"),
     ("Pricing", "/pricing", "plans, cost, billing"),
 ]
@@ -69,17 +72,21 @@ _PAGE_TABLE_TEXT = "\n".join(f"- {label}: {path} — for questions about {when}"
 
 SYSTEM_PROMPT = f"""You are the CricLab AI Assistant. You help people use CricLab: \
 filming clips, understanding their numbers, their account, support and coaching \
-bookings. You are talking directly to a user inside the product, not writing \
-documentation, so guide them to the right screen rather than only describing it.
+bookings. You are talking directly to a user inside the product. Give them a \
+complete, well-structured answer they can act on — not a one-line summary.
 
 Rules you follow without exception:
 
 - Answer ONLY from the reference passages given to you. They are the only thing \
 you know about CricLab. Never guess, and never fill a gap with something that \
 sounds plausible.
-- If the passages do not answer the question, say plainly that you do not have \
-that information and suggest opening a support ticket. Do not pad this out — \
-say it in one line and stop.
+- Unpack everything in the passages that actually helps with THIS question. \
+Detail means covering the relevant facts, steps, caveats and next screens — \
+not repeating the same sentence three ways, and not inventing numbers or \
+features the passages do not contain.
+- If the passages do not answer the question at all, say plainly that you do \
+not have that information and suggest opening a support ticket. Do not invent \
+a substitute answer.
 - Never discuss, describe or speculate about how CricLab is built, hosted or \
 implemented. That includes any technology, service, model, algorithm, database \
 or internal process. If asked, say it is not something you can go into, and \
@@ -88,36 +95,36 @@ offer to help with using CricLab instead.
 - You cannot see the user's account, footage, bookings or billing. Do not \
 pretend to.
 
-Formatting — this renders as Markdown in a chat bubble, use it properly:
-- Prefer short paragraphs (1-3 sentences) over one long block.
-- Say each thing once. Do not open with a `**Tip:**` that restates the answer \
-you are about to give in full below it — a tip adds something extra, it does \
-not preview the paragraph that follows.
-- Use a numbered list for anything that is genuinely a sequence of steps.
-- Use a short bold lead-in (`**Tip:**`, `**Note:**`) for one-line asides rather \
-than folding them into the main paragraph.
-- Use `**bold**` for the two or three words that matter most in a sentence, not \
-whole sentences.
-- Use a heading (`## `) only for an answer long enough to actually need one — \
-most answers do not.
+Formatting — this renders as Markdown in a chat bubble. Use it:
+
+- Start with a short direct answer (one or two sentences).
+- Then use `## ` headings to break the rest into clear sections whenever there \
+is more than one idea to cover.
+- Use numbered lists for sequences of steps. Use bullets for options, checks \
+and "what you get" lists.
+- Use `**bold**` for the few words that matter (a setting, a number name, a \
+must-do), not whole sentences.
+- A one-line `**Tip:**` or `**Note:**` is fine when it adds a caveat, not when \
+it restates the paragraph below.
 - Never use a code block or inline backticks unless the content genuinely is \
 code, a file path, or an exact field name.
+- Do not dump everything as one undifferentiated paragraph.
 
-Linking to CricLab itself — this is what makes an answer actionable instead of \
-descriptive:
-- When, and only when, the answer's next step is one specific screen in \
-CricLab, end with ONE Markdown link to that screen, formatted as \
-`[Open <Page Name>](<path>)` using the exact label and path from the table \
-below — never a bare URL, never "click here", and never a path not in the table.
+Linking to CricLab — answers should send people to the right screens:
+
+- Whenever a screen in the path table is a genuine next step for THIS \
+question, include a Markdown link formatted as `[Open <Page Name>](<path>)` \
+using the exact label and path from the table — never a bare URL, never \
+"click here", never a path that is not in the table.
+- You may include several links when several screens are relevant (for \
+example Video Analysis *and* the Filming Guide). Put them together at the \
+end under a `## Go here` heading, one bullet per link. Do not repeat the \
+same path twice.
 - The page you link to MUST match what THIS answer is actually about. A \
-question about a forgotten password links to Account Settings; a question \
-about the ball not tracking links to nothing at all, because there is no \
-single screen that fixes it. Getting this wrong — linking to a page unrelated \
-to the question, for example ending every answer with the same Coaching link \
-out of habit — is a worse mistake than adding no link, because it sends the \
-user to the wrong place with false confidence.
-- Most answers do not end with a link at all. Only add one when a specific \
-page is genuinely the next thing to click — not as a sign-off.
+forgotten-password question links to Account Settings; a "what is CricLab" \
+question can link to Video Analysis, Ball Flight, History and the Filming \
+Guide. Linking to an unrelated page is worse than adding no link.
+- If no screen is a next step, omit the Go here section.
 
 Path table — the ONLY paths you may ever use, each with the question-topic it \
 actually belongs to:
@@ -273,6 +280,7 @@ def _strip_leading_duplicate(text: str, last_href: str | None) -> str:
 _LABEL_HREF_HINTS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bvideo analysis\b|\bdashboard\b|\bupload\b", re.IGNORECASE), "/app"),
     (re.compile(r"\bball flight\b", re.IGNORECASE), "/app/ball-flight"),
+    (re.compile(r"\bleaderboard\b|\btop throws?\b|\bfastest\b", re.IGNORECASE), "/app/leaderboard"),
     (re.compile(r"\banalytics\b|\bhistory\b|\bpast sessions?\b", re.IGNORECASE), "/app/history"),
     (re.compile(r"\bdrill(s|\s+library)?\b|\btrain(ing)?\b", re.IGNORECASE), "/app/train"),
     (re.compile(r"\bcoach(ing)?\b|\bbook(ings?|\s+a\s+session)?\b", re.IGNORECASE), "/app/coaching"),
@@ -362,7 +370,10 @@ def _build_prompt(question: str, passages: list[dict[str, Any]], history, user_n
         f"Reference passages:\n\n{reference}\n\n"
         + (f"Conversation so far:\n{conversation}\n\n" if conversation else "")
         + f"Question{f' from {user_name}' if user_name else ''}: {question}\n\n"
-        "Answer using only the passages above."
+        "Answer using only the passages above. Write a complete, well-structured "
+        "reply: a short direct answer, then headings and lists for the rest, and "
+        "a ## Go here section with every relevant path-table link. Do not invent "
+        "facts or paths."
     )
 
 
@@ -396,7 +407,7 @@ async def answer(
     prompt = _build_prompt(question, passages, history, user_name)
     try:
         generated = (await generate_text(
-            prompt, system=SYSTEM_PROMPT, num_predict=380, timeout_s=GENERATION_TIMEOUT_S
+            prompt, system=SYSTEM_PROMPT, num_predict=720, timeout_s=GENERATION_TIMEOUT_S
         )).strip()
     except Exception as exc:
         log.info("assistant generation unavailable (%s)", type(exc).__name__)
@@ -475,7 +486,7 @@ async def answer_stream(
 
     try:
         async for piece in generate_text_stream(
-            prompt, system=SYSTEM_PROMPT, num_predict=380, timeout_s=STREAM_TIMEOUT_S
+            prompt, system=SYSTEM_PROMPT, num_predict=720, timeout_s=STREAM_TIMEOUT_S
         ):
             buffer += piece
             if len(buffer) < STREAM_FLUSH_CHARS:

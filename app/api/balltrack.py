@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
-from app.api.deps import CurrentUser, VerifiedUser
+from app.api.deps import CurrentUser, VerifiedUser, visible_to
 from app.balltrack import repo
 from app.balltrack.runner import run_balltrack_job
 from app.balltrack.stumps import detect_stump_sets
@@ -151,7 +151,7 @@ async def list_sessions(user: CurrentUser, limit: int = 50):
 @router.get("/sessions/{session_id}")
 async def get_session(session_id: str, user: CurrentUser):
     s = await repo.get_session(session_id)
-    if not s or s.get("user_id") != user["_id"]:
+    if not visible_to(user, (s or {}).get("user_id"), exists=bool(s)):
         raise HTTPException(404, "Session not found")
     deliveries = await repo.list_deliveries_for_session(session_id)
     return _public_session(s, deliveries)
@@ -160,7 +160,7 @@ async def get_session(session_id: str, user: CurrentUser):
 @router.get("/jobs/{job_id}")
 async def get_job(job_id: str, user: CurrentUser):
     job = await repo.get_job(job_id)
-    if not job or job.get("user_id") != user["_id"]:
+    if not visible_to(user, (job or {}).get("user_id"), exists=bool(job)):
         raise HTTPException(404, "Job not found")
     job["id"] = job.pop("_id")
     job["eta_seconds"] = await estimate_eta_seconds(
@@ -177,7 +177,7 @@ async def get_delivery(delivery_id: str, user: CurrentUser):
     # Deliveries carry `session_id`, not their own `user_id` — the session is
     # the owned resource, so ownership is settled by looking at its parent.
     session = await repo.get_session(d.get("session_id") or "")
-    if not session or session.get("user_id") != user["_id"]:
+    if not visible_to(user, (session or {}).get("user_id"), exists=bool(session)):
         raise HTTPException(404, "Delivery not found")
     return _public_delivery(d)
 

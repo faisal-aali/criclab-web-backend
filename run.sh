@@ -34,4 +34,4 @@ echo "Cric-Lab API → http://${HOST}:${PORT}"
 echo "Health: http://${HOST}:${PORT}/health"
 python -c "from app.config import get_settings; print('Storage:', get_settings().storage_path)"
 # python -m uvicorn (not the console script) so macOS spawn-reload can find stdlib.
-exec python -m uvicorn app.main:app --reload --reload-dir app --reload-delay 0.75 --host "$HOST" --port "$PORT"
+exec python -m uvicorn app.main:app --reload --reload-dir app --reload-exclude '*.json' --reload-exclude '*.json.tmp' --reload-delay 0.75 --host "$HOST" --port "$PORT"

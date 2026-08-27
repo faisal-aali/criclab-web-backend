@@ -38,7 +38,7 @@ KNOWLEDGE_DIR = Path(__file__).resolve().parent / "knowledge"
 # reads worse when it is quoted back.
 MAX_CHUNK_CHARS = 1100
 MIN_CHUNK_CHARS = 120
-TOP_K = 4
+TOP_K = 6
 
 # Embedding models do not put unrelated text near zero. Two sentences with
 # nothing in common still score around 0.45 cosine with a general-purpose

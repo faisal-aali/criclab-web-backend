@@ -3,10 +3,12 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from typing import Any
+
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
-from app.api.deps import CurrentUser, VerifiedUser
+from app.api.deps import CurrentUser, VerifiedUser, visible_to
 from app.config import get_settings
 from app.db import repository as repo
 from app.pipeline.eta import estimate_eta_seconds
@@ -109,12 +111,49 @@ async def upload_video(
 async def get_job(job_id: str, user: CurrentUser):
     job = await repo.get_job(job_id)
     # Same 404 whether the job doesn't exist or belongs to someone else — no
-    # signal to a caller probing ids that a given job exists at all.
-    if not job or job.get("user_id") != user["_id"]:
+    # signal to a caller probing ids that a given job exists at all. Staff
+    # may open any job so the admin panel can show the same results page.
+    if not visible_to(user, (job or {}).get("user_id"), exists=bool(job)):
         raise HTTPException(404, "Job not found")
     job["id"] = job.pop("_id")
     job["eta_seconds"] = await estimate_eta_seconds(collection="jobs", pipeline="action", job=job)
     return job
+
+
+def _ok_metric_value(metrics: dict[str, Any] | None, key: str) -> float | None:
+    node = (metrics or {}).get(key) or {}
+    if not isinstance(node, dict) or node.get("status") != "ok":
+        return None
+    val = node.get("value")
+    return float(val) if isinstance(val, (int, float)) else None
+
+
+@router.get("/leaderboard")
+async def leaderboard(user: CurrentUser, limit: int = 20):
+    """Top Action throws by measured ball speed. Other players' reports stay private."""
+    cap = min(max(limit, 1), 20)
+    rows = await repo.top_throws(limit=cap)
+    items = []
+    for rank, d in enumerate(rows, start=1):
+        metrics = d.get("metrics") or {}
+        dtype = metrics.get("delivery_type") or {}
+        profile = metrics.get("player_profile") or {}
+        pace = dtype.get("value") if isinstance(dtype, dict) and dtype.get("status") == "ok" else None
+        mine = d.get("user_id") == user["_id"]
+        items.append(
+            {
+                "rank": rank,
+                "player_name": d.get("player_name") or "Bowler",
+                "ball_speed_kmh": _ok_metric_value(metrics, "ball_speed_kmh"),
+                "arm_speed_kmh": _ok_metric_value(metrics, "arm_speed_kmh"),
+                "delivery_type": pace,
+                "bowling_arm": profile.get("bowling_arm") if isinstance(profile, dict) else None,
+                "created_at": d.get("created_at"),
+                "mine": mine,
+                "result_id": d["_id"] if mine else None,
+            }
+        )
+    return {"items": items}
 
 
 @router.get("/deliveries")
@@ -147,7 +186,7 @@ async def list_deliveries(user: CurrentUser, limit: int = 50):
 @router.get("/deliveries/{delivery_id}")
 async def get_delivery(delivery_id: str, user: CurrentUser):
     d = await repo.get_delivery(delivery_id)
-    if not d or d.get("user_id") != user["_id"]:
+    if not visible_to(user, (d or {}).get("user_id"), exists=bool(d)):
         raise HTTPException(404, "Delivery not found")
     video = await repo.get_video(d["video_id"]) if d.get("video_id") else None
     video_name = Path(video["path"]).name if video and video.get("path") else None

@@ -62,7 +62,10 @@ async def dashboard_summary(start: datetime, end: datetime) -> dict[str, Any]:
     # since this field was introduced simply has no `last_login_at` yet.
     users_active = await db.users.count_documents({"last_login_at": {"$gte": day_ago}})
     users_disabled = await db.users.count_documents({"disabled": True})
+    users_unverified = await db.users.count_documents({"email_verified": {"$ne": True}})
     users_inactive = max(0, users_total - users_active - users_disabled)
+
+    processing_statuses = ["queued", "processing", "analyzing"]
 
     def video_counts(collection: str) -> dict[str, Any]:
         col = db[collection]
@@ -73,6 +76,8 @@ async def dashboard_summary(start: datetime, end: datetime) -> dict[str, Any]:
             "month": col.count_documents({"status": "completed", "created_at": {"$gte": month_start}}),
             "total": col.count_documents({"status": "completed"}),
             "failed_range": col.count_documents({"status": "failed", "created_at": {"$gte": start, "$lt": end}}),
+            "processing": col.count_documents({"status": {"$in": processing_statuses}}),
+            "failed_total": col.count_documents({"status": "failed"}),
         }
 
     action = video_counts("jobs")
@@ -92,6 +97,9 @@ async def dashboard_summary(start: datetime, end: datetime) -> dict[str, Any]:
     tickets_open = await db.tickets.count_documents({"status": {"$in": list(tickets.LIVE_STATUSES)}})
     tickets_resolved = await db.tickets.count_documents({"status": {"$in": [tickets.RESOLVED, tickets.CLOSED]}})
 
+    recent_throws = await _recent_throws(limit=12)
+    in_progress = await _in_progress(limit=8)
+
     return {
         "range": {"from": start, "to": end},
         "users": {
@@ -100,6 +108,7 @@ async def dashboard_summary(start: datetime, end: datetime) -> dict[str, Any]:
             "active": users_active,
             "inactive": users_inactive,
             "disabled": users_disabled,
+            "unverified": users_unverified,
         },
         "videos": {
             "total": action["total"] + ball["total"],
@@ -108,6 +117,8 @@ async def dashboard_summary(start: datetime, end: datetime) -> dict[str, Any]:
             "week": action["week"] + ball["week"],
             "month": action["month"] + ball["month"],
             "failed_range": action["failed_range"] + ball["failed_range"],
+            "processing": action["processing"] + ball["processing"],
+            "failed_total": action["failed_total"] + ball["failed_total"],
             "by_pipeline": {"action": action["total"], "ball_flight": ball["total"]},
         },
         "coaching": {
@@ -120,6 +131,8 @@ async def dashboard_summary(start: datetime, end: datetime) -> dict[str, Any]:
             "open": tickets_open,
             "resolved": tickets_resolved,
         },
+        "recent_throws": recent_throws,
+        "in_progress": in_progress,
     }
 
 
@@ -146,6 +159,140 @@ async def analyses_trend(start: datetime, end: datetime) -> list[dict[str, Any]]
         for r in rows:
             counts[r["_id"]] = counts.get(r["_id"], 0) + r["n"]
     return [{"date": d, "count": n} for d, n in sorted(counts.items())]
+
+
+# --------------------------------------------------------------------------- #
+# What a player threw — numbers copied off the stored metrics JSON
+# --------------------------------------------------------------------------- #
+
+def _metric_num(metrics: dict[str, Any] | None, key: str) -> float | None:
+    if not metrics:
+        return None
+    node = metrics.get(key)
+    if not isinstance(node, dict):
+        return None
+    if node.get("status") not in (None, "ok", "estimated"):
+        return None
+    val = node.get("value")
+    return float(val) if isinstance(val, (int, float)) else None
+
+
+def _throw_fields(metrics: dict[str, Any] | None) -> dict[str, Any]:
+    metrics = metrics or {}
+    profile = metrics.get("player_profile") or {}
+    dtype = metrics.get("delivery_type") or {}
+    scores = metrics.get("scores") or {}
+    pace = dtype.get("value") if isinstance(dtype, dict) and dtype.get("status") == "ok" else None
+    return {
+        "ball_speed_kmh": _metric_num(metrics, "ball_speed_kmh"),
+        "arm_speed_kmh": _metric_num(metrics, "arm_speed_kmh"),
+        "delivery_type": pace,
+        "bowling_arm": profile.get("bowling_arm"),
+        "bowling_style": profile.get("bowling_style"),
+        "overall_score": scores.get("overall") if isinstance(scores.get("overall"), (int, float)) else None,
+    }
+
+
+async def _owners_for(user_ids: list[str]) -> dict[str, dict[str, str | None]]:
+    owners: dict[str, dict[str, str | None]] = {}
+    ids = [i for i in user_ids if i]
+    if not ids:
+        return owners
+    async for u in get_db().users.find({"_id": {"$in": ids}}, {"name": 1, "email": 1}):
+        owners[u["_id"]] = {"name": u.get("name"), "email": u.get("email")}
+    return owners
+
+
+async def _recent_throws(limit: int = 12) -> list[dict[str, Any]]:
+    """Latest completed Action deliveries — the dashboard's 'what they threw' list."""
+    db = get_db()
+    rows = await db.deliveries.find({}).sort("created_at", -1).limit(limit).to_list(limit)
+    owners = await _owners_for([r.get("user_id") for r in rows])
+    out = []
+    for d in rows:
+        item = {
+            "id": d["_id"],
+            "pipeline": "action",
+            "result_id": d["_id"],
+            "user_id": d.get("user_id"),
+            "user": owners.get(d.get("user_id")),
+            "player_name": d.get("player_name"),
+            "created_at": d.get("created_at"),
+            "summary": (d.get("analysis") or {}).get("summary"),
+            **_throw_fields(d.get("metrics")),
+        }
+        out.append(item)
+    return out
+
+
+async def _in_progress(limit: int = 8) -> list[dict[str, Any]]:
+    db = get_db()
+    live = {"status": {"$in": ["queued", "processing", "analyzing"]}}
+    jobs = await db.jobs.find(live).sort("updated_at", -1).limit(limit).to_list(limit)
+    ball = await db.balltrack_jobs.find(live).sort("updated_at", -1).limit(limit).to_list(limit)
+    rows = []
+    for j in jobs:
+        rows.append(
+            {
+                "id": j["_id"],
+                "pipeline": "action",
+                "player_name": j.get("player_name"),
+                "user_id": j.get("user_id"),
+                "status": j.get("status"),
+                "stage": j.get("stage"),
+                "progress": j.get("progress"),
+                "updated_at": j.get("updated_at"),
+            }
+        )
+    for j in ball:
+        rows.append(
+            {
+                "id": j["_id"],
+                "pipeline": "ball_flight",
+                "player_name": None,
+                "user_id": j.get("user_id"),
+                "status": j.get("status"),
+                "stage": j.get("stage"),
+                "progress": j.get("progress"),
+                "updated_at": j.get("updated_at"),
+            }
+        )
+    rows.sort(key=lambda r: r.get("updated_at") or now_floor(), reverse=True)
+    page = rows[:limit]
+    owners = await _owners_for([r.get("user_id") for r in page])
+    for r in page:
+        r["user"] = owners.get(r.get("user_id"))
+    return page
+
+
+async def _attach_results(rows: list[dict[str, Any]]) -> None:
+    """Fill `result_id` + throw numbers for a page of job-shaped analysis rows."""
+    db = get_db()
+    action_ids = [r["id"] for r in rows if r.get("pipeline") == "action"]
+    by_job: dict[str, dict[str, Any]] = {}
+    if action_ids:
+        async for d in db.deliveries.find(
+            {"job_id": {"$in": action_ids}},
+            {"job_id": 1, "metrics": 1, "analysis": 1},
+        ):
+            by_job[d["job_id"]] = d
+    ball_ids = [r["id"] for r in rows if r.get("pipeline") == "ball_flight"]
+    session_by_job: dict[str, str | None] = {}
+    if ball_ids:
+        async for j in db.balltrack_jobs.find({"_id": {"$in": ball_ids}}, {"session_id": 1}):
+            session_by_job[j["_id"]] = j.get("session_id")
+    for r in rows:
+        if r.get("pipeline") == "ball_flight":
+            r["result_id"] = session_by_job.get(r["id"])
+            continue
+        d = by_job.get(r["id"])
+        if not d:
+            r["result_id"] = None
+            continue
+        r["result_id"] = d["_id"]
+        r.update(_throw_fields(d.get("metrics")))
+        r["summary"] = (d.get("analysis") or {}).get("summary")
+
 
 
 # --------------------------------------------------------------------------- #
@@ -279,7 +426,60 @@ async def user_detail(user_id: str) -> dict[str, Any] | None:
         {"id": t["_id"], "subject": t.get("subject"), "status": t.get("status"), "updated_at": t.get("updated_at")}
         for t in recent_tickets
     ]
+    await _attach_results(out["recent_analyses"])
     return out
+
+
+async def user_history(user_id: str, limit: int = 50) -> dict[str, Any] | None:
+    """Every Action delivery and ball-flight session this account owns.
+
+    Same numbers the player sees on History / Results — staff is looking at
+    the stored metrics JSON, not a second copy of the measurement.
+    """
+    doc = await get_db().users.find_one({"_id": user_id}, {"name": 1, "email": 1})
+    if not doc:
+        return None
+    db = get_db()
+    deliveries = await db.deliveries.find({"user_id": user_id}).sort("created_at", -1).limit(limit).to_list(limit)
+    sessions = (
+        await db.balltrack_sessions.find({"user_id": user_id}).sort("created_at", -1).limit(limit).to_list(limit)
+    )
+    action = [
+        {
+            "id": d["_id"],
+            "pipeline": "action",
+            "result_id": d["_id"],
+            "player_name": d.get("player_name"),
+            "created_at": d.get("created_at"),
+            "summary": (d.get("analysis") or {}).get("summary"),
+            "delivery_count": 1,
+            **_throw_fields(d.get("metrics")),
+        }
+        for d in deliveries
+    ]
+    ball = [
+        {
+            "id": s["_id"],
+            "pipeline": "ball_flight",
+            "result_id": s["_id"],
+            "player_name": s.get("title") or "Ball flight",
+            "created_at": s.get("created_at"),
+            "summary": None,
+            "delivery_count": s.get("delivery_count") or len(s.get("delivery_ids") or []),
+            "ball_speed_kmh": None,
+            "arm_speed_kmh": None,
+            "delivery_type": None,
+            "bowling_arm": None,
+            "bowling_style": None,
+            "overall_score": None,
+        }
+        for s in sessions
+    ]
+    items = sorted(action + ball, key=lambda x: x["created_at"] or now_floor(), reverse=True)
+    return {
+        "user": {"id": doc["_id"], "name": doc.get("name"), "email": doc.get("email")},
+        "items": items,
+    }
 
 
 async def set_user_disabled(user_id: str, disabled: bool) -> dict[str, Any] | None:
@@ -339,6 +539,7 @@ async def list_analyses(
             owners[u["_id"]] = {"name": u.get("name"), "email": u.get("email")}
     for r in page_rows:
         r["user"] = owners.get(r.get("user_id"))
+    await _attach_results(page_rows)
 
     return {"items": page_rows, "total": total, "page": page, "page_size": page_size}
 
