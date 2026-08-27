@@ -41,8 +41,16 @@ torso, fence, or a stationary tree is not a ball track: return null + reason.
 - **Arm speed** = bowling-wrist px/frame **at leave-hand** (not cocking / gather peak) × scale × fps.
 - **Scale** from upright (90th-pct) head→ankle × **user-provided** height or mpp.
   Never invent 1.7 m. Without user scale → physical km/h/m are unavailable + note.
-- **Ball speed (Action)** = ballistic vs in-air estimators on the path after release, × height scale.
-  If they disagree by >35%, or view/geometry fail → unavailable. Sanity band ~25–160 km/h. Reject — never clamp.
+- **Ball speed (Action)** = one physics-constrained robust fit on the detected
+  in-air path, × height scale (`track.robust_release_velocity_px_per_frame`):
+  gravity pinned to `g/(mpp·fps²)` so y-noise cannot become speed, Theil–Sen
+  slopes so a streak-centroid outlier cannot bend the line, interpolated points
+  excluded. Refused when the fit's own residuals score below
+  `MIN_BALL_FIT_QUALITY`, or view/geometry fail. Sanity band ~25–160 km/h.
+  Reject — never clamp. (This replaced a two-estimator agreement check that
+  could not work: both estimators consumed the same corrupted `hypot(dx, dy)`,
+  so they agreed on a number ~16% too high. See "Ball speed — the y-axis is
+  noise" below.)
 - **Ball speed (Ball flight)** = stump-homography pitch-plane distance/time. Separate job.
 - **Truth contract**: measure or null+reason. Sanity gates reject — never clamp a
   bad number into a “nice” value. UI/PDF/overlay share the same metrics JSON (`status === ok`).
@@ -367,6 +375,59 @@ PT → **BFC** if the trail ankle plants.
 - Scale: user height × upright pose body px. **No fixed cm/px fallback**.
 - Sanity band: ball speeds outside ~25–160 km/h are tracking noise — not reported.
 - Front-on footage cannot yield true speed from 2D pixels — say so.
+
+## Ball speed — the y-axis is noise, and `hypot` cannot tell
+
+Measured on a real 4K/120 clip (`del_4c16280fbefa`, Aug 2026). The ball's
+**horizontal** pixel track is clean (linear-fit residual ~5 px); its
+**vertical** one is not (~19 px, and dy jumped 16.9 -> 86.8 -> 2.9 px between
+consecutive frames, once going negative). At 4K the ball is a motion-blurred
+streak a hundred-plus pixels long and the detector's centroid slides along it.
+
+Consequences, all of which were live bugs:
+
+- **`hypot(dx, dy)` per frame turns y-noise into speed.** Every frame that
+  reported 130+ km/h was a y-spike; the true image-plane speed was ~86. The
+  overlay was labelling the ball 132 km/h on the same frame the panel read
+  100 — one render contradicting itself, which is how this was noticed.
+- **Two estimators fed by the same corrupted signal do not cross-check each
+  other.** The old code blended a quadratic endpoint-derivative (104.9) with
+  the median of raw per-frame speeds (88.5) and reported 100. Both inputs were
+  inflated by the same noise, so their agreement meant nothing.
+- **Least squares cannot resist a streak-centroid outlier.** One point 124 px
+  off the path bent the whole fit; residuals went 6.7 px -> 28.2 px and the
+  trimming (median-based) failed because the outlier had already dragged the
+  line it was being measured against.
+- **The same noise corrupted the timebase.** Apparent gravity came out 11.62
+  px/frame^2 against a physical 0.343 (34x), so the gravity-derived frame rate
+  read 20.6 fps on a 120 fps clip.
+
+The fix, in `track.robust_release_velocity_px_per_frame`:
+
+1. **Pin gravity instead of fitting it.** Once `fps` and `mpp` are known,
+   vertical acceleration in pixels is `9.81 / (mpp * fps**2)` — not a free
+   parameter. Subtract `0.5*g*t**2` from y first; what remains is a straight
+   line whose slope is vertical velocity *and nothing else*, so a y-outlier can
+   no longer be absorbed as acceleration, i.e. as speed.
+2. **Theil-Sen, not least squares.** The median of all pairwise slopes: an
+   outlier corrupts only the `n-1` pairs it appears in out of `n(n-1)/2`, so
+   the median does not move. O(n^2) over ~15 points is free.
+3. **Never fit interpolated points.** `interpolate_gaps` fabricates positions
+   to keep the drawn path continuous. They are a drawing aid; fitting them
+   feeds the estimator its own guesses back as evidence.
+4. **Refuse rather than guess.** The fit returns a `quality` from its own
+   residuals; below `MIN_BALL_FIT_QUALITY` the metric goes `unavailable` with
+   a reason. This caught a track whose fitted `vx` was *negative* and which
+   had been displaying 63.24 km/h with confidence.
+
+**There is one ball speed per delivery.** Do not put a per-frame instantaneous
+number on the overlay next to a differently-computed headline — that is what
+made this visible, and a value that swings 81-133 km/h on noise is not a
+measurement worth showing.
+
+Every reported speed is logged (`criclab.metrics`, "ball-speed | ...") with
+fps, mpp, gravity, release frame, fit window, points used/dropped, residuals,
+vx/vy, and quality — enough to reproduce the number from the frame data.
 
 ## Confidence & honesty
 
