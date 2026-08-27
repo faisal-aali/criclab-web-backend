@@ -1126,3 +1126,160 @@ def _pick_candidate(
             best_cost = cost
             best = c
     return best
+
+
+# --------------------------------------------------------------------------- #
+# Release speed — physics-constrained fit
+# --------------------------------------------------------------------------- #
+
+GRAVITY_MPS2 = 9.80665
+
+
+def _gravity_px_per_frame2(fps: float, mpp: float) -> float:
+    """Gravity expressed in this clip's own pixel/frame units.
+
+    Once the frame rate and the metres-per-pixel scale are known, the ball's
+    vertical acceleration in the image is not a free parameter — it is fixed by
+    physics. Everything below leans on that.
+    """
+    return GRAVITY_MPS2 / (float(mpp) * float(fps) ** 2)
+
+
+def robust_release_velocity_px_per_frame(
+    ball_track: list[dict[str, Any]],
+    fps: float,
+    meters_per_pixel: float,
+    release_frame: int | None = None,
+) -> dict[str, Any] | None:
+    """Image-plane velocity at release, fitted with gravity pinned to physics.
+
+    Why not `hypot(dx, dy)` per frame, which is what this replaces: a ball's
+    horizontal pixel track is clean, but its *vertical* one is not. At 4K the
+    ball is a motion-blurred streak several hundred pixels long, and the
+    detector's centroid slides along that streak from frame to frame. That puts
+    tens of pixels of noise on `dy` while `dx` stays good to a few pixels — and
+    because `hypot` cannot tell the two apart, every y-glitch reads as the ball
+    briefly going faster. On the clip this was written for, `dy` jumped
+    16.9 -> 86.8 -> 2.9 px between consecutive frames and once went *negative*;
+    the frames where it spiked are exactly the frames that reported 130+ km/h
+    beside a true speed near 86.
+
+    The fix is to stop letting `y` carry velocity information it does not have:
+
+    * `x(t)` is fitted linearly — it is the trustworthy axis, and over the short
+      window used here a receding ball's decay is far below the noise floor.
+    * `y(t)` is fitted as `y0 + vy*t + 0.5*g*t**2` with **g pinned** to
+      `_gravity_px_per_frame2`, not free. Only `y0` and `vy` are solved for, so
+      a y-outlier can shift the fit slightly but can no longer invent
+      acceleration — and therefore can no longer invent speed.
+    * Points are trimmed iteratively against the fit's own residual spread, so a
+      single bad detection is dropped rather than averaged in.
+
+    Returns a dict carrying the fitted velocity *and* the evidence for it
+    (residuals, points kept/dropped, a 0-1 quality). Callers are expected to
+    refuse a speed whose quality is poor rather than display it — an honest
+    "could not measure" beats a confident wrong number.
+    """
+    if not ball_track or not fps or not meters_per_pixel:
+        return None
+
+    # Interpolated points are fabricated by `interpolate_gaps` to keep the drawn
+    # path continuous. They are a drawing aid, not observations, and must never
+    # be fitted as if they were measurements.
+    pts = sorted(
+        (p for p in ball_track if p.get("source") != "interpolated"),
+        key=lambda p: p["frame"],
+    )
+    if len(pts) < 5:
+        return None
+
+    t0 = int(pts[0]["frame"]) if release_frame is None else int(release_frame)
+    # Stay near release: the ball is still at the bowler's own depth plane there,
+    # which is the plane the height scale actually calibrates.
+    span = max(6, int(round(float(fps) * 0.12)))
+    early = [p for p in pts if 0 <= int(p["frame"]) - t0 <= span]
+    if len(early) < 5:
+        early = pts[: max(5, min(14, len(pts)))]
+    if len(early) < 5:
+        return None
+
+    g_px = _gravity_px_per_frame2(fps, meters_per_pixel)
+    f = np.array([float(p["frame"]) for p in early])
+    x = np.array([float(p["x"]) for p in early])
+    y = np.array([float(p["y"]) for p in early])
+    t = f - f[0]
+
+    def _theil_sen(tt: np.ndarray, vv: np.ndarray) -> float:
+        """Median of every pairwise slope.
+
+        Least squares minimises *squared* error, so one detection sitting a
+        hundred pixels off the path bends the whole line toward itself — which
+        is exactly what happened here before this replaced it. Theil-Sen takes
+        the median slope instead: an outlier corrupts only the pairs it appears
+        in, and with n points that is n-1 of n(n-1)/2 pairs, so the median never
+        moves. It costs an O(n^2) pass over at most ~15 points.
+        """
+        sl = [
+            (vv[j] - vv[i]) / (tt[j] - tt[i])
+            for i in range(len(tt))
+            for j in range(i + 1, len(tt))
+            if tt[j] > tt[i]
+        ]
+        return float(np.median(sl)) if sl else 0.0
+
+    # y carries a known quadratic. Remove it first and what is left is a
+    # straight line whose slope is vertical velocity and nothing else — so a
+    # y-outlier can no longer be absorbed as "acceleration", i.e. as speed.
+    y_lin = y - 0.5 * g_px * t**2
+    vx = _theil_sen(t, x)
+    vy = _theil_sen(t, y_lin)
+
+    x0 = float(np.median(x - vx * t))
+    y0 = float(np.median(y_lin - vy * t))
+    rx = x - (x0 + vx * t)
+    ry = y_lin - (y0 + vy * t)
+    resid = np.hypot(rx, ry)
+
+    # Drop points the robust line already disagrees with, then re-fit on what
+    # survives so the reported velocity reflects only real observations.
+    med = float(np.median(resid))
+    mad = float(np.median(np.abs(resid - med))) or 1.0
+    keep = resid <= max(med + 3.0 * mad, 8.0)
+    if keep.sum() >= 4 and not keep.all():
+        vx = _theil_sen(t[keep], x[keep])
+        vy = _theil_sen(t[keep], y_lin[keep])
+        x0 = float(np.median(x[keep] - vx * t[keep]))
+        y0 = float(np.median(y_lin[keep] - vy * t[keep]))
+        rx = x - (x0 + vx * t)
+        ry = y_lin - (y0 + vy * t)
+    if keep.sum() < 4:
+        keep = np.ones(len(t), dtype=bool)
+
+    x_rms = float(np.sqrt(np.mean(rx[keep] ** 2)))
+    y_rms = float(np.sqrt(np.mean(ry[keep] ** 2)))
+
+    speed = float(np.hypot(vx, vy))
+    if not np.isfinite(speed) or speed <= 0.4:
+        return None
+
+    # Quality: how well the physics-constrained model actually described these
+    # points, relative to the distance the ball moves in one frame. A fit whose
+    # residuals approach a frame of travel is not measuring the ball.
+    resid_rel = float(np.hypot(x_rms, y_rms)) / speed if speed > 0 else 1.0
+    quality = max(0.0, min(1.0, 1.0 - resid_rel / 0.35))
+    if keep.sum() < 5:
+        quality *= 0.6
+
+    return {
+        "vx_px_per_frame": vx,
+        "vy_px_per_frame": vy,
+        "speed_px_per_frame": speed,
+        "points_used": int(keep.sum()),
+        "points_dropped": int(len(t) - keep.sum()),
+        "x_residual_px": x_rms,
+        "y_residual_px": y_rms,
+        "gravity_px_per_frame2": g_px,
+        "quality": quality,
+        "first_frame": int(f[0]),
+        "last_frame": int(f[-1]),
+    }

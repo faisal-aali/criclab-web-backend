@@ -21,6 +21,14 @@ ORANGE = (38, 92, 196)
 RED = (28, 28, 185)
 WHITE = (245, 245, 245)
 INK = (28, 24, 20)
+# Overlays sit *over* footage a coach is trying to read. Blended, not opaque,
+# and thin enough that the body stays visible underneath.
+TRAIL_ALPHA = 0.55
+MARKER_ALPHA = 0.75
+TRAIL_W_HAND = 5
+TRAIL_W_BALL = 3
+SKELETON_W = 2
+SKELETON_ALPHA = 0.6
 BONE = (210, 190, 90)       # skeleton (light blue)
 BLUE = (220, 150, 50)       # FFC
 GREEN_PH = (90, 200, 90)    # MER
@@ -279,7 +287,8 @@ def render_overlay_video(
 
         pf = lms_by_frame.get(idx)
         _draw_skeleton(frame, pf, pairs, side, scale)
-        _draw_trail(frame, idx, wrist_trail, ball_pts_by_frame, phases, events, release_frame)
+        _draw_trail(frame, idx, wrist_trail, ball_pts_by_frame, phases, events, release_frame,
+                    release_speed_kmh=(_metric_ok(metrics, "ball_speed_kmh") or {}).get("value"))
 
         if rel_scaled is not None and release_frame is not None and idx >= release_frame:
             cv2.circle(frame, rel_scaled, 18, (18, 18, 18), 5, cv2.LINE_AA)
@@ -398,20 +407,22 @@ def _draw_skeleton(frame, pf, pairs, side, scale):
         L = posemod.LANDMARKS
         bowling_ids = {L[f"{side}_shoulder"], L[f"{side}_elbow"], L[f"{side}_wrist"]}
 
+    # Blended as one layer rather than per-limb: overlapping strokes drawn with
+    # per-shape alpha would compound at the joints and read as opaque there.
+    layer = frame.copy()
     for a, b in pairs:
         pa, pb = sp(a), sp(b)
         if pa is None or pb is None:
             continue
-        color = ORANGE if (a in bowling_ids and b in bowling_ids) else BONE
-        thick = 3 if (a in bowling_ids and b in bowling_ids) else 2
-        cv2.line(frame, pa, pb, color, thick, cv2.LINE_AA)
+        bowling = a in bowling_ids and b in bowling_ids
+        cv2.line(layer, pa, pb, ORANGE if bowling else BONE,
+                 SKELETON_W + 1 if bowling else SKELETON_W, cv2.LINE_AA)
     for i in range(len(lms)):
         p = sp(i)
         if p is None:
             continue
-        fill = ORANGE if i in bowling_ids else BONE
-        cv2.circle(frame, p, 5, fill, -1, cv2.LINE_AA)
-        cv2.circle(frame, p, 5, WHITE, 1, cv2.LINE_AA)
+        cv2.circle(layer, p, 3, ORANGE if i in bowling_ids else BONE, -1, cv2.LINE_AA)
+    cv2.addWeighted(layer, SKELETON_ALPHA, frame, 1.0 - SKELETON_ALPHA, 0, frame)
 
 
 def _smooth_wrist_trail(
@@ -449,7 +460,8 @@ def _smooth_wrist_trail(
     return [(int(f), (int(x), int(y))) for f, x, y in zip(raw_f, xs, ys)]
 
 
-def _draw_trail(frame, idx, wrist_trail, ball_pts_by_frame, phases, events, release_frame):
+def _draw_trail(frame, idx, wrist_trail, ball_pts_by_frame, phases, events, release_frame,
+                release_speed_kmh=None):
     past_wrist = [(fr, pt) for fr, pt in wrist_trail if fr <= idx]
     past_ball = sorted(
         (fr, v["pt"])
@@ -478,14 +490,19 @@ def _draw_trail(frame, idx, wrist_trail, ball_pts_by_frame, phases, events, rele
                 buf.append(pt)
         if len(buf) >= 2:
             segs.append((color, buf))
+        # Drawn onto a scratch copy and blended back, so the footage stays
+        # readable through the trail. Painting straight onto `frame` at these
+        # widths hid the very mechanics the trail is meant to point at.
+        layer = frame.copy()
         for col, pts in segs:
             arr = np.array(pts, np.int32)
-            cv2.polylines(frame, [arr], False, (22, 22, 22), thickness + 6, cv2.LINE_AA)
-            cv2.polylines(frame, [arr], False, col, thickness, cv2.LINE_AA)
+            cv2.polylines(layer, [arr], False, (22, 22, 22), thickness + 3, cv2.LINE_AA)
+            cv2.polylines(layer, [arr], False, col, thickness, cv2.LINE_AA)
+        cv2.addWeighted(layer, TRAIL_ALPHA, frame, 1.0 - TRAIL_ALPHA, 0, frame)
 
     # Hand path is the hero. Ball path continues after REL.
-    stroke(past_wrist, 11)
-    stroke(past_ball, 6)
+    stroke(past_wrist, TRAIL_W_HAND)
+    stroke(past_ball, TRAIL_W_BALL)
 
     # Phase beads on the hand path.
     if past_wrist:
@@ -496,20 +513,30 @@ def _draw_trail(frame, idx, wrist_trail, ball_pts_by_frame, phases, events, rele
             nearest = min(past_wrist, key=lambda t: abs(t[0] - fr))
             pt = by_fr.get(fr, nearest[1])
             col = PHASE_COLOR.get(key, WHITE)
-            cv2.circle(frame, pt, 12, (18, 18, 18), -1, cv2.LINE_AA)
-            cv2.circle(frame, pt, 10, col, -1, cv2.LINE_AA)
-            cv2.circle(frame, pt, 10, WHITE, 2, cv2.LINE_AA)
+            bead = frame.copy()
+            cv2.circle(bead, pt, 8, (18, 18, 18), -1, cv2.LINE_AA)
+            cv2.circle(bead, pt, 6, col, -1, cv2.LINE_AA)
+            cv2.circle(bead, pt, 6, WHITE, 1, cv2.LINE_AA)
+            cv2.addWeighted(bead, MARKER_ALPHA, frame, 1.0 - MARKER_ALPHA, 0, frame)
 
     live = ball_pts_by_frame.get(idx)
     if live:
         cx, cy = live["pt"]
         br = int(max(10, live.get("r") or 10))
         color = _color_for_frame(idx, phases)
-        cv2.ellipse(frame, (cx, cy), (br, max(8, int(br * 0.72))), 0, 0, 360, color, 3, cv2.LINE_AA)
-        cv2.circle(frame, (cx, cy), 3, WHITE, -1, cv2.LINE_AA)
-        _text(frame, "BALL", (cx + br + 8, cy - br), 0.5, color, 2)
-        if live.get("speed_kmh") is not None:
-            _text(frame, f"{live['speed_kmh']:.0f} km/h", (cx + br + 8, cy - br + 22), 0.55, WHITE, 2)
+        ring = frame.copy()
+        cv2.ellipse(ring, (cx, cy), (br, max(8, int(br * 0.72))), 0, 0, 360, color, 2, cv2.LINE_AA)
+        cv2.circle(ring, (cx, cy), 3, WHITE, -1, cv2.LINE_AA)
+        cv2.addWeighted(ring, MARKER_ALPHA, frame, 1.0 - MARKER_ALPHA, 0, frame)
+        _text(frame, "BALL", (cx + br + 8, cy - br), 0.5, color, 1)
+        # Deliberately the *measured release speed*, not this frame's raw
+        # displacement. The per-frame value swung 81-133 km/h on noise alone,
+        # so the ball was being labelled 133 on the same frame the panel read
+        # 100 — one render contradicting itself. There is one ball speed for
+        # the delivery; it is shown here and in the panel, or nowhere.
+        if release_speed_kmh is not None:
+            _text(frame, f"{release_speed_kmh:.0f} km/h at release",
+                  (cx + br + 8, cy - br + 22), 0.5, WHITE, 1)
 
 
 def _draw_top_bar(frame, w, player_name, metrics, in_window):

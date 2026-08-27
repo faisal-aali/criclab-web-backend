@@ -2,9 +2,10 @@
 .venv312/
 __pycache__/
 *.pyc
-.env
 .DS_Store
 storage/
 *.mp4
 *.mov
 .Python
+config.bat
+node_modules
