@@ -38,6 +38,7 @@ async def run_analysis_job(
     meters_per_pixel: float | None = None,
     reference_height_m: float | None = None,
     player_profile: dict[str, Any] | None = None,
+    user_id: str | None = None,
 ) -> None:
     settings = get_settings()
     try:
@@ -197,6 +198,7 @@ async def run_analysis_job(
             "_id": delivery_id,
             "job_id": job_id,
             "video_id": video_id,
+            "user_id": user_id,
             "player_name": player_name,
             "player_profile": player_profile,
             "created_at": created,

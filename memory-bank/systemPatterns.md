@@ -172,6 +172,31 @@ torso, fence, or a stationary tree is not a ball track: return null + reason.
   so counters expire themselves.
 - **Guards hide UI; the API enforces access.** Every handler scopes to the caller
   by putting `user_id` in the query filter — never trusting a client-supplied id.
+- **A frontend route guard is not the same claim as "every API call from that
+  page carries identity."** `/videos` and `/balltrack/sessions` sat behind a
+  gated frontend route for a full task (TASK-010/011) while the actual
+  request had no Authorization header at all — the old `client.ts` used a
+  bare `fetch()`, never `authFetch`. Caught while building the admin panel's
+  per-user analysis counts, which could not be real without it. When adding a
+  new owned resource, verify the *request*, not just the *route*, carries the
+  caller's identity — read the actual fetch call, don't infer it from which
+  page uses it.
+
+## Admin panel authorization
+
+- **Every admin route depends on `AdminUser`, with no exceptions and no
+  route that "will add it later."** `app/api/admin.py` exists as one file
+  specifically so this is auditable at a glance — every handler in it takes
+  an `AdminUser`-typed parameter, and nothing outside this file queries across
+  every account's data. Confirmed 403 for a signed-in non-admin and 401 for
+  anonymous against every route before considering it done (see TASK-012).
+- **Sensitive admin actions go through the same audit trail as sensitive user
+  actions** (`auth_repo.log_security_event`) — disabling an account and
+  sending a broadcast are logged the same way a password change or a
+  sign-out-everywhere already were. Not a parallel logging system.
+- **An admin cannot disable their own account** (checked before the write,
+  not left to "well, they probably won't") — the one guard specific to this
+  panel that isn't just "requires AdminUser."
 
 ## Support, coaching and the assistant
 
@@ -218,6 +243,40 @@ torso, fence, or a stationary tree is not a ball track: return null + reason.
   embedding model is unreachable — a support assistant that stops answering
   because a model is down is worse than one that answers a little less
   precisely.
+- **Casual messages skip retrieval entirely.** `app/assistant/intent.py`
+  classifies a short, whole-message greeting/thanks/farewell *before* RAG or
+  the LLM are touched, and answers directly. Deliberately narrow (a length
+  cap, whole-message match only) so "hi, why wasn't my ball tracked?" still
+  gets treated as a real question rather than a greeting with the actual
+  question silently dropped.
+- **Streaming output still has to pass the same leak-scan and link-allow-list
+  as a non-streaming answer** — buffering happens in fixed-size chunks
+  (`STREAM_FLUSH_CHARS`) specifically so the leak regex always sees a full
+  chunk of context, not a token at a time. A `redacted` event replaces
+  whatever the client had already shown if a check fires mid-stream; that is
+  the actual security boundary, not the prompt telling the model to behave.
+- **A small local model will write a markdown link's *intent* correctly and
+  its *syntax* inconsistently** — bare `[Label]` with no href, the raw path
+  used as the label, the href duplicated right after itself, or the whole
+  thing split across two streamed chunks. Every one of these was found by
+  reading actual streamed output, not by inspecting the prompt, and each has
+  its own narrow repair function in `app/assistant/chat.py`
+  (`_repair_bare_links`, `_humanize_link_text`, `_collapse_duplicate_href`,
+  `_split_before_open_bracket`/`_strip_leading_duplicate`) rather than one
+  attempt to make the prompt stricter. Treat the model's link as a signal of
+  *intent*, not as trustworthy final syntax.
+- **A prompt's own example gets copied verbatim.** An early version of the
+  link instructions used one real link (`[Open Coaching](/app/coaching)`) as
+  the format example; the model then appended that exact link to answers
+  about forgotten passwords and untracked balls. Fixed by using a placeholder
+  pattern in the instructions instead of a real example, and giving each row
+  of the allowed-links table an explicit "for questions about X" hint so the
+  model has a reason to pick the *right* link, not just *a* link.
+- **ETA blends a job's own pace with recent history, not either alone**
+  (`app/pipeline/eta.py`). Elapsed-time-over-progress is nonsense at low
+  progress (early stages are quick relative to later ones); a flat historical
+  average ignores that *this* video might be longer or the machine busier.
+  The blend weight shifts toward "trust this job" as progress advances.
 
 ## Frontend API contract (sibling repo: criclab-web-frontend)
 

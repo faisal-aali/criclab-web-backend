@@ -41,8 +41,9 @@ async def update_session(session_id: str, **fields: Any) -> None:
     await _col_sessions().update_one({"_id": session_id}, {"$set": fields})
 
 
-async def list_sessions(limit: int = 50) -> list[dict[str, Any]]:
-    cursor = _col_sessions().find().sort("created_at", -1).limit(limit)
+async def list_sessions(limit: int = 50, user_id: str | None = None) -> list[dict[str, Any]]:
+    query: dict[str, Any] = {"user_id": user_id} if user_id else {}
+    cursor = _col_sessions().find(query).sort("created_at", -1).limit(limit)
     return await cursor.to_list(length=limit)
 
 

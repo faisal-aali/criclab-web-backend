@@ -25,6 +25,8 @@ INDEXES: dict[str, list[IndexModel]] = {
         # which two concurrent signups could both pass.
         IndexModel([("email", ASCENDING)], unique=True, name="uniq_email"),
         IndexModel([("created_at", DESCENDING)], name="created_desc"),
+        # The admin dashboard's "active users" count filters on this directly.
+        IndexModel([("last_login_at", DESCENDING)], name="last_login_desc"),
     ],
     "sessions": [
         # Refresh tokens are looked up by digest on every renewal.
@@ -90,6 +92,18 @@ INDEXES: dict[str, list[IndexModel]] = {
     ],
     "jobs": [
         IndexModel([("user_id", ASCENDING), ("created_at", DESCENDING)], name="user_recent"),
+        IndexModel([("status", ASCENDING), ("created_at", DESCENDING)], name="status_recent"),
+    ],
+    # Ball-flight pipeline — same shape as `jobs`/`deliveries`, own collections.
+    "balltrack_jobs": [
+        IndexModel([("user_id", ASCENDING), ("created_at", DESCENDING)], name="user_recent"),
+        IndexModel([("status", ASCENDING), ("created_at", DESCENDING)], name="status_recent"),
+    ],
+    "balltrack_sessions": [
+        IndexModel([("user_id", ASCENDING), ("created_at", DESCENDING)], name="user_recent"),
+    ],
+    "admin_broadcasts": [
+        IndexModel([("created_at", DESCENDING)], name="created_desc"),
     ],
 }
 

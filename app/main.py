@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import (
+    admin,
     assistant,
     auth,
     balltrack,
@@ -67,6 +68,7 @@ app.include_router(coaching.router)
 app.include_router(bookings.router)
 app.include_router(support.router)
 app.include_router(assistant.router)
+app.include_router(admin.router)
 
 
 @app.get("/")

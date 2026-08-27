@@ -83,6 +83,52 @@ async def generate_text(
         return (r.json().get("response") or "").strip()
 
 
+async def generate_text_stream(
+    prompt: str,
+    system: str | None = None,
+    *,
+    num_predict: int = 500,
+    timeout_s: float = 60.0,
+):
+    """Yield response text as it is generated, instead of waiting for all of it.
+
+    Ollama's `/api/generate` with `stream: true` returns one JSON object per
+    line, each carrying the next slice of `response`. A person watching a chat
+    bubble fill in word by word perceives this as far faster than the same
+    total generation time delivered as one blob at the end — which is the
+    entire point of wiring this through, not a cosmetic touch.
+
+    Yields plain text deltas. Raises on a connection failure or non-2xx status,
+    same as `generate_text` — the caller decides the fallback.
+    """
+    settings = get_settings()
+    payload: dict[str, Any] = {
+        "model": settings.ollama_model,
+        "prompt": prompt,
+        "stream": True,
+        "keep_alive": "10m",
+        "options": {"temperature": 0.3, "num_predict": num_predict},
+    }
+    if system:
+        payload["system"] = system
+    timeout = httpx.Timeout(timeout_s, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", f"{settings.ollama_base_url}/api/generate", json=payload) as r:
+            r.raise_for_status()
+            async for line in r.aiter_lines():
+                if not line.strip():
+                    continue
+                try:
+                    chunk = json.loads(line)
+                except ValueError:
+                    continue
+                piece = chunk.get("response")
+                if piece:
+                    yield piece
+                if chunk.get("done"):
+                    break
+
+
 def get_delivery_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     """Compact, LLM-friendly view of metrics (no bulky trajectory arrays)."""
 

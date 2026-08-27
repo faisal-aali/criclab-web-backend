@@ -7,10 +7,12 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
+from app.api.deps import CurrentUser, VerifiedUser
 from app.balltrack import repo
 from app.balltrack.runner import run_balltrack_job
 from app.balltrack.stumps import detect_stump_sets
 from app.config import get_settings
+from app.pipeline.eta import estimate_eta_seconds
 
 router = APIRouter(prefix="/balltrack", tags=["balltrack"])
 
@@ -72,6 +74,7 @@ def _public_delivery(d: dict) -> dict:
 
 @router.post("/sessions")
 async def create_session(
+    user: VerifiedUser,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     calibration: str = Form(...),
@@ -105,6 +108,7 @@ async def create_session(
     await repo.insert_session(
         {
             "_id": session_id,
+            "user_id": user["_id"],
             "title": title.strip() or "Ball Track session",
             "path": str(dest),
             "original_name": file.filename,
@@ -119,6 +123,7 @@ async def create_session(
         {
             "_id": job_id,
             "session_id": session_id,
+            "user_id": user["_id"],
             "status": "queued",
             "progress": 0,
             "stage": "queued",
@@ -138,33 +143,41 @@ async def create_session(
 
 
 @router.get("/sessions")
-async def list_sessions(limit: int = 50):
-    items = await repo.list_sessions(limit=limit)
+async def list_sessions(user: CurrentUser, limit: int = 50):
+    items = await repo.list_sessions(limit=limit, user_id=user["_id"])
     return {"items": [_public_session(s) for s in items]}
 
 
 @router.get("/sessions/{session_id}")
-async def get_session(session_id: str):
+async def get_session(session_id: str, user: CurrentUser):
     s = await repo.get_session(session_id)
-    if not s:
+    if not s or s.get("user_id") != user["_id"]:
         raise HTTPException(404, "Session not found")
     deliveries = await repo.list_deliveries_for_session(session_id)
     return _public_session(s, deliveries)
 
 
 @router.get("/jobs/{job_id}")
-async def get_job(job_id: str):
+async def get_job(job_id: str, user: CurrentUser):
     job = await repo.get_job(job_id)
-    if not job:
+    if not job or job.get("user_id") != user["_id"]:
         raise HTTPException(404, "Job not found")
     job["id"] = job.pop("_id")
+    job["eta_seconds"] = await estimate_eta_seconds(
+        collection="balltrack_jobs", pipeline="ballflight", job=job
+    )
     return job
 
 
 @router.get("/deliveries/{delivery_id}")
-async def get_delivery(delivery_id: str):
+async def get_delivery(delivery_id: str, user: CurrentUser):
     d = await repo.get_delivery(delivery_id)
     if not d:
+        raise HTTPException(404, "Delivery not found")
+    # Deliveries carry `session_id`, not their own `user_id` — the session is
+    # the owned resource, so ownership is settled by looking at its parent.
+    session = await repo.get_session(d.get("session_id") or "")
+    if not session or session.get("user_id") != user["_id"]:
         raise HTTPException(404, "Delivery not found")
     return _public_delivery(d)
 

@@ -108,3 +108,30 @@ High-level features. Detail lives in `tasks/`.
   implementation before they reach the model, and strips the answer if a
   disallowed term leaks through anyway. See TASK-011 for the two real bugs the
   build caught.
+- **27 Aug 2026 (TASK-012, in progress):** Video-analysis ETA, chatbot overhaul,
+  and an admin panel. **Done and verified:** (1) `app/pipeline/eta.py` blends
+  each job's own elapsed-time/progress pace with a historical average of the
+  last 20 completed jobs for that pipeline, wired into both `/jobs/{id}`
+  endpoints as `eta_seconds`. (2) Chatbot: `app/assistant/intent.py` fast-paths
+  greetings/thanks/farewells before RAG runs at all; `/assistant/ask/stream`
+  streams NDJSON deltas via a new `generate_text_stream()` in
+  `ollama_agent.py`; the system prompt now requires Markdown formatting and
+  grounds navigation links in a fixed `PAGE_LINKS` table (never an invented
+  path); a chain of post-generation repairs
+  (`_sanitize_links`/`_humanize_link_text`/`_repair_bare_links`/
+  `_collapse_duplicate_href`) fixes the specific malformed-link patterns a 4B
+  local model actually produces — each one found by testing, not anticipated
+  up front, see TASK-012 for the four distinct bugs and fixes. (3) **A
+  foundational gap closed**: video/ball-flight analyses had no `user_id` at
+  all — `client.ts` sent no auth header and the upload endpoints never
+  recorded who uploaded. Now `VerifiedUser`-gated, `user_id` stored on
+  video/job/delivery docs, and every read endpoint scopes to the owner
+  (404, not 403, on a mismatch — no signal that the id exists). (4) Admin
+  backend: `app/api/admin.py` + `app/services/admin_service.py` — dashboard
+  metrics with date-range filtering, paginated user search with
+  activate/deactivate, a combined cross-pipeline analyses list, an all-users
+  bookings list, ticket metrics, and a notification broadcast with history —
+  every route behind `AdminUser`, confirmed 403/401 for non-admin/anonymous.
+  Admin frontend is now wired: six pages under `/admin/*` (`RequireAdmin` +
+  `AdminLayout`), AccountMenu entry for `role === 'admin'`. Coach CRUD UI and
+  booking calendar remain deferred — see TASK-012.

@@ -6,8 +6,10 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
+from app.api.deps import CurrentUser, VerifiedUser
 from app.config import get_settings
 from app.db import repository as repo
+from app.pipeline.eta import estimate_eta_seconds
 from app.pipeline.profile import parse_player_profile
 from app.pipeline.runner import run_analysis_job
 
@@ -16,6 +18,7 @@ router = APIRouter(tags=["analysis"])
 
 @router.post("/videos")
 async def upload_video(
+    user: VerifiedUser,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     player_name: str = Form("Bowler"),
@@ -63,6 +66,7 @@ async def upload_video(
 
     video_doc = {
         "_id": video_id,
+        "user_id": user["_id"],
         "original_name": file.filename,
         "path": str(dest),
         "content_type": file.content_type,
@@ -75,6 +79,7 @@ async def upload_video(
     job_doc = {
         "_id": job_id,
         "video_id": video_id,
+        "user_id": user["_id"],
         "status": "queued",
         "progress": 0,
         "stage": "queued",
@@ -94,23 +99,27 @@ async def upload_video(
         meters_per_pixel=profile.get("meters_per_pixel"),
         reference_height_m=profile["height_m"],
         player_profile=profile,
+        user_id=user["_id"],
     )
 
     return {"video_id": video_id, "job_id": job_id, "status": "queued"}
 
 
 @router.get("/jobs/{job_id}")
-async def get_job(job_id: str):
+async def get_job(job_id: str, user: CurrentUser):
     job = await repo.get_job(job_id)
-    if not job:
+    # Same 404 whether the job doesn't exist or belongs to someone else — no
+    # signal to a caller probing ids that a given job exists at all.
+    if not job or job.get("user_id") != user["_id"]:
         raise HTTPException(404, "Job not found")
     job["id"] = job.pop("_id")
+    job["eta_seconds"] = await estimate_eta_seconds(collection="jobs", pipeline="action", job=job)
     return job
 
 
 @router.get("/deliveries")
-async def list_deliveries(limit: int = 50):
-    items = await repo.list_deliveries(limit=limit)
+async def list_deliveries(user: CurrentUser, limit: int = 50):
+    items = await repo.list_deliveries(limit=limit, user_id=user["_id"])
     out = []
     for d in items:
         out.append(
@@ -136,9 +145,9 @@ async def list_deliveries(limit: int = 50):
 
 
 @router.get("/deliveries/{delivery_id}")
-async def get_delivery(delivery_id: str):
+async def get_delivery(delivery_id: str, user: CurrentUser):
     d = await repo.get_delivery(delivery_id)
-    if not d:
+    if not d or d.get("user_id") != user["_id"]:
         raise HTTPException(404, "Delivery not found")
     video = await repo.get_video(d["video_id"]) if d.get("video_id") else None
     video_name = Path(video["path"]).name if video and video.get("path") else None

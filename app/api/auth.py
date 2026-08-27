@@ -312,6 +312,9 @@ async def sign_in(body: SignInIn, tasks: BackgroundTasks, client: Client):
     await auth_repo.log_security_event(
         user_id=user["_id"], event="login", ip=client.ip, user_agent=client.user_agent
     )
+    # Read by the admin dashboard's "active users" metric — a simple stamp
+    # rather than a session log, since only "when last" is ever asked of it.
+    await auth_repo.update_user(user["_id"], last_login_at=datetime.now(timezone.utc))
     sessions = await auth_repo.list_sessions(user["_id"])
     if len(sessions) >= 1:
         # Only worth mentioning when there was already a session elsewhere.

@@ -11,9 +11,11 @@ question can leak from.
 
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import APIRouter, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api.deps import AdminUser, Client, OptionalUser, enforce_rate_limit
@@ -55,6 +57,33 @@ async def ask(payload: AskIn, user: OptionalUser, client: Client):
         user_name=(user.get("name", "").split(" ")[0] if user else None),
     )
     return result
+
+
+@router.post("/ask/stream")
+async def ask_stream(payload: AskIn, user: OptionalUser, client: Client):
+    """Same answer as `/ask`, delivered as it is generated.
+
+    Newline-delimited JSON rather than SSE — one line, one event, trivial to
+    parse on either side, with none of SSE's `event:`/`data:` framing to get
+    wrong for a body this simple.
+    """
+    key = f"assistant:{user['_id']}" if user else f"assistant:ip:{client.ip or 'unknown'}"
+    await enforce_rate_limit(
+        key,
+        limit=40 if user else 15,
+        window_seconds=600,
+        message="That is a lot of questions at once. Give it a minute.",
+    )
+
+    async def events():
+        async for event in chat.answer_stream(
+            payload.question,
+            history=[t.model_dump() for t in payload.history],
+            user_name=(user.get("name", "").split(" ")[0] if user else None),
+        ):
+            yield json.dumps(event) + "\n"
+
+    return StreamingResponse(events(), media_type="application/x-ndjson")
 
 
 @router.post("/reindex", status_code=status.HTTP_202_ACCEPTED)
