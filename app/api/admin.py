@@ -103,6 +103,17 @@ async def set_user_status(user_id: str, payload: UserStatusIn, admin: AdminUser,
 
 
 # --------------------------------------------------------------------------- #
+# Leaderboard
+# --------------------------------------------------------------------------- #
+
+@router.get("/leaderboard")
+async def admin_leaderboard(_: AdminUser):
+    """Every ranked Action throw — not the public top-20 cut. Report IDs are
+    included so staff can open any player's delivery from the board."""
+    return await svc.leaderboard()
+
+
+# --------------------------------------------------------------------------- #
 # Analyses
 # --------------------------------------------------------------------------- #
 

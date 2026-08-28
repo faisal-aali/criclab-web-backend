@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from app.db.mongo import get_db
-from app.db.repository import new_id, utcnow
+from app.db.repository import new_id, top_throws, utcnow
 from app.services import booking_service as bookings
 from app.services import support_service as tickets
 
@@ -658,3 +658,38 @@ async def list_broadcasts(limit: int = 30) -> list[dict[str, Any]]:
         }
         for r in rows
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Leaderboard — every ranked Action throw, not the public top-20 cut
+# --------------------------------------------------------------------------- #
+
+ADMIN_LEADERBOARD_CAP = 10_000
+
+
+async def leaderboard() -> dict[str, Any]:
+    """All measured Action throws, fastest first, with owner identity.
+
+    The public `/leaderboard` endpoint hard-caps at 20 and hides other
+    players' result IDs. Staff need the full board and a report link on
+    every row.
+    """
+    rows = await top_throws(limit=ADMIN_LEADERBOARD_CAP)
+    owners = await _owners_for([r.get("user_id") for r in rows])
+    items = []
+    for rank, d in enumerate(rows, start=1):
+        metrics = d.get("metrics") or {}
+        fields = _throw_fields(metrics)
+        items.append(
+            {
+                "rank": rank,
+                "result_id": d["_id"],
+                "user_id": d.get("user_id"),
+                "user": owners.get(d.get("user_id")),
+                "player_name": d.get("player_name") or "Bowler",
+                "created_at": d.get("created_at"),
+                **fields,
+            }
+        )
+    return {"items": items, "total": len(items)}
+

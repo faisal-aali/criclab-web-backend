@@ -57,7 +57,13 @@ async def list_deliveries(
 
 
 async def top_throws(limit: int = 20) -> list[dict[str, Any]]:
-    """Fastest Action deliveries with a measured (not estimated) ball speed."""
+    """Fastest Action deliveries with a measured (not estimated) ball speed.
+
+    The public board caps at 20; admin can pass a much larger limit to list
+    every ranked throw. `limit` is always applied so a missing cap cannot
+    dump the whole collection.
+    """
+    cap = max(1, int(limit))
     pipeline: list[dict[str, Any]] = [
         {
             "$match": {
@@ -66,7 +72,7 @@ async def top_throws(limit: int = 20) -> list[dict[str, Any]]:
             }
         },
         {"$sort": {"metrics.ball_speed_kmh.value": -1, "created_at": 1}},
-        {"$limit": limit},
+        {"$limit": cap},
         {
             "$project": {
                 "_id": 1,
@@ -80,7 +86,7 @@ async def top_throws(limit: int = 20) -> list[dict[str, Any]]:
             }
         },
     ]
-    return await get_db().deliveries.aggregate(pipeline).to_list(limit)
+    return await get_db().deliveries.aggregate(pipeline).to_list(cap)
 
 
 async def get_video(video_id: str) -> dict[str, Any] | None:
