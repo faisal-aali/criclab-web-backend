@@ -182,8 +182,16 @@ def _lexical_score(question_terms: set[str], chunk: dict[str, Any]) -> float:
 # --------------------------------------------------------------------------- #
 
 async def _embed(texts: list[str]) -> list[list[float]] | None:
-    """Embed with the local model. Returns None if it is not reachable."""
+    """Embed with the active environment's model. Returns None if unreachable."""
     settings = get_settings()
+    if settings.is_production:
+        try:
+            from app.agent.bedrock_client import embed_texts
+
+            return await embed_texts(texts)
+        except Exception as exc:
+            log.info("embedding unavailable (%s) — using term matching", type(exc).__name__)
+            return None
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
@@ -229,7 +237,7 @@ async def build_index(*, force: bool = False) -> dict[str, Any]:
     """Embed anything whose text has changed since it was last embedded."""
     chunks = load_chunks()
     db = get_db()
-    model = get_settings().ollama_embed_model
+    model = get_settings().embed_model_id
 
     stored = {
         row["_id"]: row
@@ -277,7 +285,7 @@ async def build_index(*, force: bool = False) -> dict[str, Any]:
 
 
 async def _vectors() -> dict[str, list[float]]:
-    model = get_settings().ollama_embed_model
+    model = get_settings().embed_model_id
     return {
         row["_id"]: row["vector"]
         async for row in get_db().kb_chunks.find({"model": model}, {"vector": 1})

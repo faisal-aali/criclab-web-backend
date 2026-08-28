@@ -34,6 +34,25 @@ async def lifespan(_: FastAPI):
     # A fresh install should have a working coaching calendar, not an empty
     # page. Existing profiles are never touched.
     await seed_coaches()
+    log = logging.getLogger("criclab")
+    if settings.is_production:
+        log.info(
+            "LLM: Bedrock production  chat=%s  embed=%s  region=%s",
+            settings.bedrock_model_id,
+            settings.bedrock_embedding_model_id,
+            settings.aws_region,
+        )
+        if not (settings.aws_access_key_id and settings.aws_secret_access_key):
+            log.warning(
+                "APP_ENV=production but AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are empty. "
+                "Bedrock calls will fail unless an IAM role is attached to this host."
+            )
+    else:
+        log.info(
+            "LLM: Ollama local  chat=%s  embed=%s",
+            settings.ollama_model,
+            settings.ollama_embed_model,
+        )
     # Embeds only what has changed; a no-op on most boots.
     try:
         await build_index()

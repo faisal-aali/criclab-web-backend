@@ -67,6 +67,10 @@ async def generate_text(
     somebody typing into a chat box is, so that caller passes a low ceiling
     and falls back rather than leaving the request hanging."""
     settings = get_settings()
+    if settings.llm_provider == "bedrock":
+        from app.agent.bedrock_client import converse
+
+        return await converse(prompt, system=system, max_tokens=num_predict, timeout_s=timeout_s)
     payload: dict[str, Any] = {
         "model": settings.ollama_model,
         "prompt": prompt,
@@ -102,6 +106,14 @@ async def generate_text_stream(
     same as `generate_text` — the caller decides the fallback.
     """
     settings = get_settings()
+    if settings.llm_provider == "bedrock":
+        from app.agent.bedrock_client import converse_stream
+
+        async for piece in converse_stream(
+            prompt, system=system, max_tokens=num_predict, timeout_s=timeout_s
+        ):
+            yield piece
+        return
     payload: dict[str, Any] = {
         "model": settings.ollama_model,
         "prompt": prompt,
