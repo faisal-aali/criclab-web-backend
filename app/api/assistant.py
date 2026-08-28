@@ -16,7 +16,9 @@ import logging
 
 from fastapi import APIRouter, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from typing import Any
+
+from pydantic import BaseModel, Field, field_validator
 
 from app.api.deps import AdminUser, Client, OptionalUser, enforce_rate_limit
 from app.assistant import chat, rag
@@ -27,12 +29,19 @@ router = APIRouter(prefix="/assistant", tags=["assistant"])
 
 class Turn(BaseModel):
     role: str = Field(pattern="^(user|assistant)$")
-    content: str = Field(max_length=2000)
+    content: str = ""
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def clip_turn(cls, v: object) -> str:
+        # Long replies used to 422 the next question ("at most 2000 characters").
+        # Clip instead of rejecting so the conversation can continue.
+        return str(v or "")[:600]
 
 
 class AskIn(BaseModel):
     question: str = Field(min_length=1, max_length=800)
-    history: list[Turn] = Field(default_factory=list, max_length=12)
+    history: list[Turn] = Field(default_factory=list, max_length=16)
 
 
 @router.get("/starters")

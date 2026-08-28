@@ -13,8 +13,11 @@ from app.balltrack.runner import run_balltrack_job
 from app.balltrack.stumps import detect_stump_sets
 from app.config import get_settings
 from app.pipeline.eta import estimate_eta_seconds
+from app.services import cloudinary_service
 
 router = APIRouter(prefix="/balltrack", tags=["balltrack"])
+
+_VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 
 
 @router.post("/detect-stumps")
@@ -76,16 +79,13 @@ def _public_delivery(d: dict) -> dict:
 async def create_session(
     user: VerifiedUser,
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
+    source_url: str | None = Form(None),
+    original_name: str | None = Form(None),
     calibration: str = Form(...),
     title: str = Form("Ball Track session"),
     pitch_length_m: float | None = Form(None),
 ):
-    if not file.filename:
-        raise HTTPException(400, "Missing filename")
-    suffix = Path(file.filename).suffix.lower() or ".mp4"
-    if suffix not in {".mp4", ".mov", ".avi", ".mkv", ".webm"}:
-        raise HTTPException(400, "Unsupported video type")
     try:
         cal = json.loads(calibration)
     except json.JSONDecodeError as exc:
@@ -100,9 +100,35 @@ async def create_session(
     videos_dir.mkdir(parents=True, exist_ok=True)
     session_id = repo.new_id("bts")
     job_id = repo.new_id("btj")
-    dest = videos_dir / f"{session_id}{suffix}"
-    with dest.open("wb") as out:
-        shutil.copyfileobj(file.file, out)
+    dest = videos_dir / session_id
+    url = (source_url or "").strip()
+    stored_name = original_name
+    if url:
+        if not cloudinary_service.is_cloudinary_url(url):
+            raise HTTPException(400, "Video URL is not from our upload host")
+        from urllib.parse import urlparse
+
+        suffix = Path(urlparse(url).path).suffix.lower() or ".mp4"
+        if suffix not in _VIDEO_SUFFIXES:
+            suffix = ".mp4"
+        dest = dest.with_suffix(suffix)
+        try:
+            await cloudinary_service.download_to_path(url, dest)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(502, "Could not fetch the uploaded video") from exc
+        stored_name = stored_name or Path(urlparse(url).path).name or dest.name
+    else:
+        if not file or not file.filename:
+            raise HTTPException(400, "Attach a video or a source_url")
+        suffix = Path(file.filename).suffix.lower() or ".mp4"
+        if suffix not in _VIDEO_SUFFIXES:
+            raise HTTPException(400, "Unsupported video type")
+        dest = dest.with_suffix(suffix)
+        with dest.open("wb") as out:
+            shutil.copyfileobj(file.file, out)
+        stored_name = file.filename
 
     now = repo.utcnow()
     await repo.insert_session(
@@ -111,7 +137,7 @@ async def create_session(
             "user_id": user["_id"],
             "title": title.strip() or "Ball Track session",
             "path": str(dest),
-            "original_name": file.filename,
+            "original_name": stored_name,
             "calibration": cal,
             "status": "queued",
             "delivery_ids": [],

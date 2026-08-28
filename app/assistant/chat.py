@@ -32,11 +32,14 @@ from app.assistant import rag
 log = logging.getLogger("criclab.assistant")
 
 MAX_QUESTION_CHARS = 800
-MAX_HISTORY_TURNS = 6
+MAX_HISTORY_TURNS = 8
 # Someone is watching a typing indicator. Past this it is better to answer
 # from the passages directly than to keep them waiting.
 GENERATION_TIMEOUT_S = 40.0
 STREAM_TIMEOUT_S = 45.0
+# Keep replies short enough that history stays under the request size limit
+# and the next turn is not rejected.
+ANSWER_TOKENS = 280
 # How much streamed text to buffer before it is scanned and flushed to the
 # client. Smaller means a more immediate-feeling stream; larger means the
 # leak-scan (see `_leaks`) sees more context per check. This is a tuning knob,
@@ -70,64 +73,24 @@ _ALLOWED_HREFS = {path for _, path, _ in PAGE_LINKS} | {"/contact", "/features",
 _HREF_TO_LABEL = {path: f"Open {label}" for label, path, _ in PAGE_LINKS}
 _PAGE_TABLE_TEXT = "\n".join(f"- {label}: {path} — for questions about {when}" for label, path, when in PAGE_LINKS)
 
-SYSTEM_PROMPT = f"""You are the CricLab AI Assistant. You help people use CricLab: \
-filming clips, understanding their numbers, their account, support and coaching \
-bookings. You are talking directly to a user inside the product. Give them a \
-complete, well-structured answer they can act on — not a one-line summary.
+SYSTEM_PROMPT = f"""You are the CricLab AI Assistant. Help people use CricLab: \
+filming, reports, accounts, support and coaching. Talk to the user in the product.
 
-Rules you follow without exception:
+Rules:
+- Answer ONLY from the reference passages. Never guess.
+- Keep the reply short: about 80–140 words. Cover the useful facts, then stop.
+- Start with one or two direct sentences. Use a short list only if it helps.
+- If the passages do not cover the question, say you do not have that and \
+suggest a support ticket. Do not invent features or numbers.
+- Never discuss how CricLab is built, hosted or implemented.
+- You cannot see the user's account or footage.
 
-- Answer ONLY from the reference passages given to you. They are the only thing \
-you know about CricLab. Never guess, and never fill a gap with something that \
-sounds plausible.
-- Unpack everything in the passages that actually helps with THIS question. \
-Detail means covering the relevant facts, steps, caveats and next screens — \
-not repeating the same sentence three ways, and not inventing numbers or \
-features the passages do not contain.
-- If the passages do not answer the question at all, say plainly that you do \
-not have that information and suggest opening a support ticket. Do not invent \
-a substitute answer.
-- Never discuss, describe or speculate about how CricLab is built, hosted or \
-implemented. That includes any technology, service, model, algorithm, database \
-or internal process. If asked, say it is not something you can go into, and \
-offer to help with using CricLab instead.
-- Never state prices, plan limits or figures that are not in the passages.
-- You cannot see the user's account, footage, bookings or billing. Do not \
-pretend to.
+Linking:
+- When a screen in the path table is a real next step, add at most two Markdown \
+links as `[Open <Page Name>](<path>)` at the end. Exact paths only.
+- Skip links if none apply.
 
-Formatting — this renders as Markdown in a chat bubble. Use it:
-
-- Start with a short direct answer (one or two sentences).
-- Then use `## ` headings to break the rest into clear sections whenever there \
-is more than one idea to cover.
-- Use numbered lists for sequences of steps. Use bullets for options, checks \
-and "what you get" lists.
-- Use `**bold**` for the few words that matter (a setting, a number name, a \
-must-do), not whole sentences.
-- A one-line `**Tip:**` or `**Note:**` is fine when it adds a caveat, not when \
-it restates the paragraph below.
-- Never use a code block or inline backticks unless the content genuinely is \
-code, a file path, or an exact field name.
-- Do not dump everything as one undifferentiated paragraph.
-
-Linking to CricLab — answers should send people to the right screens:
-
-- Whenever a screen in the path table is a genuine next step for THIS \
-question, include a Markdown link formatted as `[Open <Page Name>](<path>)` \
-using the exact label and path from the table — never a bare URL, never \
-"click here", never a path that is not in the table.
-- You may include several links when several screens are relevant (for \
-example Video Analysis *and* the Filming Guide). Put them together at the \
-end under a `## Go here` heading, one bullet per link. Do not repeat the \
-same path twice.
-- The page you link to MUST match what THIS answer is actually about. A \
-forgotten-password question links to Account Settings; a "what is CricLab" \
-question can link to Video Analysis, Ball Flight, History and the Filming \
-Guide. Linking to an unrelated page is worse than adding no link.
-- If no screen is a next step, omit the Go here section.
-
-Path table — the ONLY paths you may ever use, each with the question-topic it \
-actually belongs to:
+Path table:
 {_PAGE_TABLE_TEXT}
 """
 
@@ -344,8 +307,8 @@ def _extractive(passages: list[dict[str, Any]]) -> str:
     if not passages:
         return NO_ANSWER
     body = passages[0]["body"]
-    if len(body) > 900:
-        body = body[:900].rsplit(". ", 1)[0] + "."
+    if len(body) > 520:
+        body = body[:520].rsplit(". ", 1)[0] + "."
     return f"Here is what the CricLab guide says about {passages[0]['title'].split(' — ')[-1].lower()}:\n\n{body}"
 
 
@@ -355,7 +318,7 @@ def _history_text(history: list[dict[str, str]] | None) -> str:
     lines = []
     for turn in history[-MAX_HISTORY_TURNS:]:
         role = "User" if turn.get("role") == "user" else "Assistant"
-        content = (turn.get("content") or "").strip()[:400]
+        content = (turn.get("content") or "").strip()[:280]
         if content:
             lines.append(f"{role}: {content}")
     return "\n".join(lines)
@@ -370,10 +333,9 @@ def _build_prompt(question: str, passages: list[dict[str, Any]], history, user_n
         f"Reference passages:\n\n{reference}\n\n"
         + (f"Conversation so far:\n{conversation}\n\n" if conversation else "")
         + f"Question{f' from {user_name}' if user_name else ''}: {question}\n\n"
-        "Answer using only the passages above. Write a complete, well-structured "
-        "reply: a short direct answer, then headings and lists for the rest, and "
-        "a ## Go here section with every relevant path-table link. Do not invent "
-        "facts or paths."
+        "Answer using only the passages above. Keep it under 140 words: a direct "
+        "answer, then only the facts that help, then at most two path-table links. "
+        "Do not invent facts or paths."
     )
 
 
@@ -407,7 +369,7 @@ async def answer(
     prompt = _build_prompt(question, passages, history, user_name)
     try:
         generated = (await generate_text(
-            prompt, system=SYSTEM_PROMPT, num_predict=720, timeout_s=GENERATION_TIMEOUT_S
+            prompt, system=SYSTEM_PROMPT, num_predict=ANSWER_TOKENS, timeout_s=GENERATION_TIMEOUT_S
         )).strip()
     except Exception as exc:
         log.info("assistant generation unavailable (%s)", type(exc).__name__)
@@ -486,7 +448,7 @@ async def answer_stream(
 
     try:
         async for piece in generate_text_stream(
-            prompt, system=SYSTEM_PROMPT, num_predict=720, timeout_s=STREAM_TIMEOUT_S
+            prompt, system=SYSTEM_PROMPT, num_predict=ANSWER_TOKENS, timeout_s=STREAM_TIMEOUT_S
         ):
             buffer += piece
             if len(buffer) < STREAM_FLUSH_CHARS:

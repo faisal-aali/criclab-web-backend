@@ -14,15 +14,72 @@ from app.db import repository as repo
 from app.pipeline.eta import estimate_eta_seconds
 from app.pipeline.profile import parse_player_profile
 from app.pipeline.runner import run_analysis_job
+from app.services import cloudinary_service
 
 router = APIRouter(tags=["analysis"])
+
+_VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+
+
+@router.get("/videos/upload-params")
+async def video_upload_params(_: VerifiedUser):
+    """Signed Cloudinary fields so the browser can POST the clip off-Vercel."""
+    params = cloudinary_service.signed_video_upload_params()
+    if not params:
+        return {"configured": False}
+    return {"configured": True, **params}
+
+
+async def _store_incoming_video(
+    *,
+    dest: Path,
+    file: UploadFile | None,
+    source_url: str | None,
+    original_name: str | None,
+) -> tuple[str, str | None]:
+    """Write a clip to `dest` from a local upload or a Cloudinary URL."""
+    url = (source_url or "").strip()
+    if url:
+        if not cloudinary_service.is_cloudinary_url(url):
+            raise HTTPException(400, "Video URL is not from our upload host")
+        suffix = Path(urlparse_path(url)).suffix.lower() or ".mp4"
+        if suffix not in _VIDEO_SUFFIXES:
+            suffix = ".mp4"
+        dest = dest.with_suffix(suffix)
+        try:
+            await cloudinary_service.download_to_path(url, dest)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(502, "Could not fetch the uploaded video") from exc
+        name = original_name or Path(urlparse_path(url)).name or dest.name
+        return str(dest), name
+
+    if not file or not file.filename:
+        raise HTTPException(400, "Attach a video or a source_url")
+    suffix = Path(file.filename).suffix.lower() or ".mp4"
+    if suffix not in _VIDEO_SUFFIXES:
+        raise HTTPException(400, "Unsupported video type")
+    dest = dest.with_suffix(suffix)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with dest.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+    return str(dest), file.filename
+
+
+def urlparse_path(url: str) -> str:
+    from urllib.parse import urlparse
+
+    return urlparse(url).path
 
 
 @router.post("/videos")
 async def upload_video(
     user: VerifiedUser,
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
+    source_url: str | None = Form(None),
+    original_name: str | None = Form(None),
     player_name: str = Form("Bowler"),
     first_name: str | None = Form(None),
     last_name: str | None = Form(None),
@@ -35,11 +92,6 @@ async def upload_video(
     meters_per_pixel: float | None = Form(None),
     reference_height_m: float | None = Form(None),
 ):
-    if not file.filename:
-        raise HTTPException(400, "Missing filename")
-    suffix = Path(file.filename).suffix.lower() or ".mp4"
-    if suffix not in {".mp4", ".mov", ".avi", ".mkv", ".webm"}:
-        raise HTTPException(400, "Unsupported video type")
 
     profile = parse_player_profile(
         player_name=player_name,
@@ -61,17 +113,21 @@ async def upload_video(
 
     video_id = repo.new_id("vid")
     job_id = repo.new_id("job")
-    dest = videos_dir / f"{video_id}{suffix}"
-
-    with dest.open("wb") as out:
-        shutil.copyfileobj(file.file, out)
+    path, stored_name = await _store_incoming_video(
+        dest=videos_dir / video_id,
+        file=file,
+        source_url=source_url,
+        original_name=original_name,
+    )
+    dest = Path(path)
 
     video_doc = {
         "_id": video_id,
         "user_id": user["_id"],
-        "original_name": file.filename,
+        "original_name": stored_name,
         "path": str(dest),
-        "content_type": file.content_type,
+        "source_url": (source_url or "").strip() or None,
+        "content_type": (file.content_type if file else "video/mp4"),
         "player_name": profile["player_name"],
         "player_profile": profile,
         "created_at": repo.utcnow(),

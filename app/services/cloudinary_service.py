@@ -61,6 +61,58 @@ def is_configured() -> bool:
     return _ensure_configured()
 
 
+def signed_video_upload_params(*, folder: str = "criclab/incoming") -> dict[str, Any] | None:
+    """Browser uploads the clip to Cloudinary so Vercel never sees the bytes.
+
+    Vercel Functions reject bodies over ~4.5 MB (`FUNCTION_PAYLOAD_TOO_LARGE`).
+    A cricket clip is almost always larger, so the file must go around the API.
+    """
+    if not _ensure_configured():
+        return None
+    import time
+
+    from cloudinary.utils import api_sign_request
+
+    timestamp = int(time.time())
+    params = {"timestamp": timestamp, "folder": folder}
+    signature = api_sign_request(params, cloudinary.config().api_secret)
+    return {
+        "cloud_name": cloudinary.config().cloud_name,
+        "api_key": cloudinary.config().api_key,
+        "timestamp": timestamp,
+        "signature": signature,
+        "folder": folder,
+        "resource_type": "video",
+    }
+
+
+def is_cloudinary_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host == "res.cloudinary.com" or host.endswith(".cloudinary.com")
+
+
+async def download_to_path(url: str, dest: Path, *, max_bytes: int = 180_000_000) -> None:
+    """Pull a remote video onto local disk (Vercel `/tmp`) for the pipeline."""
+    import httpx
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    timeout = httpx.Timeout(180.0, connect=20.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            with dest.open("wb") as out:
+                async for chunk in response.aiter_bytes(1024 * 256):
+                    written += len(chunk)
+                    if written > max_bytes:
+                        dest.unlink(missing_ok=True)
+                        raise ValueError("Video is too large to analyse")
+                    out.write(chunk)
+    if written < 1024:
+        dest.unlink(missing_ok=True)
+        raise ValueError("Downloaded video was empty")
+
+
 def upload_video(path: Path, public_id: str, folder: str = "criclab/videos") -> dict[str, Any] | None:
     if not _ensure_configured():
         return None

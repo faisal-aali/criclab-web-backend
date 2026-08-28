@@ -38,7 +38,7 @@ KNOWLEDGE_DIR = Path(__file__).resolve().parent / "knowledge"
 # reads worse when it is quoted back.
 MAX_CHUNK_CHARS = 1100
 MIN_CHUNK_CHARS = 120
-TOP_K = 6
+TOP_K = 4
 
 # Embedding models do not put unrelated text near zero. Two sentences with
 # nothing in common still score around 0.45 cosine with a general-purpose
@@ -161,6 +161,32 @@ def load_chunks() -> list[dict[str, Any]]:
 def _terms(text: str) -> set[str]:
     words = re.findall(r"[a-z0-9]+", (text or "").lower())
     return {w for w in words if len(w) > 2 and w not in _STOPWORDS}
+
+
+_TERM_ALIASES = {
+    "platform": {"criclab", "product"},
+    "product": {"criclab"},
+    "app": {"criclab"},
+    "site": {"criclab"},
+    "website": {"criclab"},
+    "lab": {"criclab"},
+    "tool": {"criclab"},
+    "service": {"criclab"},
+}
+
+_PRODUCT_QUESTION = re.compile(
+    r"\b(criclab|platform|product|(?:what(?:'s| is)|tell me about) (?:this|it|the) (?:app|platform|product|site|lab)|what is criclab)\b",
+    re.IGNORECASE,
+)
+
+
+def _expand_terms(terms: set[str]) -> set[str]:
+    extra: set[str] = set()
+    for term in terms:
+        extra |= _TERM_ALIASES.get(term, set())
+    if extra or terms & {"tell", "about", "what"}:
+        extra.add("criclab")
+    return terms | extra
 
 
 def _lexical_score(question_terms: set[str], chunk: dict[str, Any]) -> float:
@@ -306,7 +332,7 @@ async def retrieve(question: str, *, k: int = TOP_K) -> list[dict[str, Any]]:
     chunks = load_chunks()
     if not chunks:
         return []
-    question_terms = _terms(question)
+    question_terms = _expand_terms(_terms(question))
     lexical = {c["id"]: _lexical_score(question_terms, c) for c in chunks}
 
     semantic: dict[str, float] = {}
@@ -330,6 +356,19 @@ async def retrieve(question: str, *, k: int = TOP_K) -> list[dict[str, Any]]:
 
     scored.sort(key=lambda pair: pair[0], reverse=True)
     if not scored or scored[0][0] < MIN_TOP_RELEVANCE:
+        if _PRODUCT_QUESTION.search(question or ""):
+            intro = [c for c in chunks if str(c.get("source", "")).startswith("01-")]
+            return [
+                {
+                    "id": c["id"],
+                    "title": c["title"],
+                    "doc": c["doc"],
+                    "source": c["source"],
+                    "body": c["body"],
+                    "score": 1.0,
+                }
+                for c in intro[:3]
+            ]
         return []
     return [
         {

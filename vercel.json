@@ -5,7 +5,7 @@
   "functions": {
     "app/main.py": {
       "maxDuration": 300,
-      "excludeFiles": "{.venv312/**,.venv/**,memory-bank/**,docs/**,**/*.md,.idea/**}"
+      "excludeFiles": "{.venv312/**,.venv/**,memory-bank/**,docs/**,.idea/**}"
     }
   }
 }
