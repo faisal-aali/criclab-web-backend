@@ -12,4 +12,5 @@ storage
 *.mp4
 *.mov
 .env
+.env.local
 package-lock.json

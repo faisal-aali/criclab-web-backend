@@ -9,3 +9,4 @@ storage/
 *.mov
 .Python
 .vercel
+.env*
