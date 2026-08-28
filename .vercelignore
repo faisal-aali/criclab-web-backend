@@ -1,0 +1,15 @@
+.venv
+.venv312
+.git
+.cursor
+.idea
+__pycache__
+*.pyc
+.DS_Store
+memory-bank
+docs
+storage
+*.mp4
+*.mov
+.env
+package-lock.json

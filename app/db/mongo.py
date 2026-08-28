@@ -13,7 +13,11 @@ def get_client() -> AsyncIOMotorClient:
         # browser parses them as local time — a timestamp created seconds ago
         # renders as hours old, and any server-side comparison against an aware
         # "now" is wrong by the machine's UTC offset.
-        _client = AsyncIOMotorClient(get_settings().mongodb_uri, tz_aware=True)
+        _client = AsyncIOMotorClient(
+            get_settings().mongodb_uri,
+            tz_aware=True,
+            serverSelectionTimeoutMS=8000,
+        )
     return _client
 
 

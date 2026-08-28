@@ -1,4 +1,5 @@
 from functools import lru_cache
+from os import environ
 from pathlib import Path
 from typing import Any
 
@@ -56,12 +57,25 @@ class Settings(BaseSettings):
     cloudinary_api_secret: str | None = None
 
     @field_validator(
-        "default_meters_per_pixel",
         "jwt_secret",
         "smtp_host",
         "smtp_user",
         "smtp_pass",
         "email_from",
+        mode="before",
+    )
+    @classmethod
+    def empty_keep_str(cls, v: Any) -> str:
+        # These fields are `str`, not Optional. Empty env on Vercel arrives as
+        # None / "" and must not be coerced to None or Settings fails to boot.
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            return v.strip()
+        return str(v)
+
+    @field_validator(
+        "default_meters_per_pixel",
         "cloudinary_url",
         "cloudinary_cloud_name",
         "cloudinary_api_key",
@@ -83,6 +97,10 @@ class Settings(BaseSettings):
     @field_validator("app_env", mode="before")
     @classmethod
     def _app_env(cls, v: Any) -> str:
+        # Vercel injects VERCEL=1. If APP_ENV is not set there, use production
+        # (Bedrock) rather than the local Ollama default.
+        if environ.get("VERCEL") and not (environ.get("APP_ENV") or "").strip():
+            return "production"
         value = str(v or "local").strip().lower()
         if value in ("prod", "production"):
             return "production"
@@ -112,6 +130,8 @@ class Settings(BaseSettings):
             path = Path(raw).expanduser()
             if not path.is_absolute():
                 path = (Path(__file__).resolve().parent.parent / path).resolve()
+        elif environ.get("VERCEL"):
+            path = Path("/tmp/criclab")
         else:
             path = default_storage_dir()
         path.mkdir(parents=True, exist_ok=True)

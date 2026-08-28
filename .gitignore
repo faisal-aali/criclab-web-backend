@@ -8,3 +8,4 @@ storage/
 *.mp4
 *.mov
 .Python
+.vercel

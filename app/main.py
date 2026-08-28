@@ -21,7 +21,7 @@ from app.assistant.rag import build_index
 from app.coaching.coaches_seed import seed_coaches
 from app.config import get_settings
 from app.db.indexes import ensure_indexes
-from app.db.mongo import close_mongo
+from app.db.mongo import close_mongo, ping_mongo
 
 
 @asynccontextmanager
@@ -30,10 +30,25 @@ async def lifespan(_: FastAPI):
     for sub in ("videos", "artifacts", "frames", "balltrack"):
         (settings.storage_path / sub).mkdir(parents=True, exist_ok=True)
     # Idempotent; also the only place uniqueness and TTL rules are declared.
-    await ensure_indexes()
-    # A fresh install should have a working coaching calendar, not an empty
-    # page. Existing profiles are never touched.
-    await seed_coaches()
+    # Ping once: if Mongo is down (typical on Vercel before Atlas is configured)
+    # skip indexes/seed instead of waiting 8s per collection.
+    if await ping_mongo():
+        try:
+            await ensure_indexes()
+        except Exception as exc:
+            logging.getLogger("criclab").warning(
+                "mongo indexes skipped at startup: %s: %s", type(exc).__name__, exc
+            )
+        try:
+            await seed_coaches()
+        except Exception as exc:
+            logging.getLogger("criclab").warning(
+                "coach seed skipped at startup: %s: %s", type(exc).__name__, exc
+            )
+    else:
+        logging.getLogger("criclab").warning(
+            "mongo unreachable at startup; indexes and coach seed skipped"
+        )
     log = logging.getLogger("criclab")
     if settings.is_production:
         log.info(
@@ -73,6 +88,7 @@ settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
+    allow_origin_regex=r"https://([a-z0-9-]+\.)?vercel\.app" if settings.is_production else None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

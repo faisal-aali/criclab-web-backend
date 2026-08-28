@@ -3,8 +3,9 @@ uvicorn[standard]>=0.32.0
 python-multipart>=0.0.12
 pymongo>=4.10.0
 motor>=3.6.0
-# opencv-contrib-python is pulled in by mediapipe; keep headless out to avoid clashes.
-opencv-contrib-python>=4.10.0
+# Headless: Vercel has no libGL. MediaPipe may still pull the GUI wheel;
+# vercel_opencv_headless.py uninstalls it during the Vercel build.
+opencv-contrib-python-headless==4.11.0.86
 # mediapipe pins numpy<2 and requires Python 3.10-3.12 (use the .venv312 environment).
 # Solutions API (mp.solutions.pose) was removed in 0.10.30+ — keep below that.
 numpy<2
