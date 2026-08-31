@@ -55,6 +55,10 @@ Copy `.env.example` → `.env`. Important keys:
 
 **Never commit `.env`.** It may contain API secrets.
 
+## Production (Lightsail)
+
+Push to `main` deploys via the self-hosted runner (FastAPI + PM2). Instance steps: [DEPLOY.md](DEPLOY.md).
+
 ## Demo / test videos
 
 Sample clips live under `storage/videos/` (gitignored). Runtime uploads/artifacts use `STORAGE_DIR`, not this folder.

@@ -1,0 +1,46 @@
+# Sync Python source onto the instance, then restart via PM2.
+# The runner is registered to this repo only — `self-hosted` is enough.
+# This is FastAPI, not Node — do not npm ci here.
+name: Deploy Backend
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: lightsail-backend
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check runtime
+        run: |
+          whoami
+          python3.12 --version
+
+      - name: Sync source (never overwrites .env or the venv)
+        run: |
+          DEST=/var/www/criclab-web-backend
+          mkdir -p "$DEST"
+          rsync -a --delete \
+            --exclude '.git/' \
+            --exclude '.venv/' \
+            --exclude '.venv312/' \
+            --exclude '.env' \
+            --exclude '.env.*' \
+            --exclude 'storage/' \
+            --exclude '__pycache__/' \
+            --exclude '*.pyc' \
+            ./ "$DEST/"
+
+      - name: Install dependencies and restart API
+        run: bash /var/www/criclab-web-backend/deploy/restart.sh
