@@ -9,4 +9,4 @@ Enable the local hook once:
 git config core.hooksPath .githooks
 ```
 
-The instance directory must already be a git clone. Add repo secret `GH_PAT` (a GitHub PAT with `repo` access). Keep `/var/www/criclab-web-backend/.env` on the instance only.
+The instance directory must already be a git clone. Do not put a PAT in `origin`. Keep `/var/www/criclab-web-backend/.env` on the instance only.

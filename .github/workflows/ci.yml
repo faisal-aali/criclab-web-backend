@@ -43,7 +43,7 @@ jobs:
 
       - name: git pull
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: bash deploy/pull.sh "$APP_DIR" main
 
       - name: Install and restart
