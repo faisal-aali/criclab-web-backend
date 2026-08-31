@@ -1,10 +1,12 @@
-# Deploy backend (self-hosted runner)
+# Backend CI and deploy
 
-Push to `main`. The workflow:
+1. `git push` runs `python3 -m compileall app` locally (see `.githooks/pre-push`). A failing check never reaches GitHub.
+2. GitHub **CI** compiles the app. **Deploy** runs only if that job passes.
 
-1. `git pull` in `/var/www/criclab-web-backend`
-2. install `requirements.txt` into `.venv312`
-3. `python -m compileall app`
-4. `pm2 restart criclab-api`
+Enable the local hook once:
 
-Keep `/var/www/criclab-web-backend/.env` on the instance only.
+```bash
+git config core.hooksPath .githooks
+```
+
+The instance directory must already be a git clone. Add repo secret `GH_PAT` (a GitHub PAT with `repo` access). Keep `/var/www/criclab-web-backend/.env` on the instance only.
