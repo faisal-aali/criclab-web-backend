@@ -41,7 +41,10 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
-"$PY" -m venv .venv312
+if [[ ! -x .venv312/bin/python ]] || ! .venv312/bin/python -c 'import sys; raise SystemExit(0 if (3, 10) <= sys.version_info[:2] <= (3, 12) else 1)'; then
+  rm -rf .venv312
+  "$PY" -m venv .venv312
+fi
 # shellcheck source=/dev/null
 source .venv312/bin/activate
 python -m pip install -q --upgrade pip
