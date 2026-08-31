@@ -6,6 +6,7 @@ the app falls back to serving artifacts from local disk.
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -91,7 +92,13 @@ def is_cloudinary_url(url: str) -> bool:
     return host == "res.cloudinary.com" or host.endswith(".cloudinary.com")
 
 
-async def download_to_path(url: str, dest: Path, *, max_bytes: int = 180_000_000) -> None:
+async def download_to_path(
+    url: str,
+    dest: Path,
+    *,
+    max_bytes: int = 180_000_000,
+    on_progress: Any | None = None,
+) -> None:
     """Pull a remote video onto local disk (Vercel `/tmp`) for the pipeline."""
     import httpx
 
@@ -101,6 +108,7 @@ async def download_to_path(url: str, dest: Path, *, max_bytes: int = 180_000_000
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         async with client.stream("GET", url) as response:
             response.raise_for_status()
+            total = int(response.headers.get("content-length") or 0) or None
             with dest.open("wb") as out:
                 async for chunk in response.aiter_bytes(1024 * 256):
                     written += len(chunk)
@@ -108,9 +116,17 @@ async def download_to_path(url: str, dest: Path, *, max_bytes: int = 180_000_000
                         dest.unlink(missing_ok=True)
                         raise ValueError("Video is too large to analyse")
                     out.write(chunk)
+                    if on_progress:
+                        maybe = on_progress(written, total)
+                        if inspect.isawaitable(maybe):
+                            await maybe
     if written < 1024:
         dest.unlink(missing_ok=True)
         raise ValueError("Downloaded video was empty")
+    if on_progress:
+        maybe = on_progress(written, total or written)
+        if inspect.isawaitable(maybe):
+            await maybe
 
 
 def upload_video(path: Path, public_id: str, folder: str = "criclab/videos") -> dict[str, Any] | None:

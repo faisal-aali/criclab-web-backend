@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import cv2
@@ -14,6 +15,7 @@ def collect_candidates(
     video_path,
     max_seconds: float = 180.0,
     target_width: int = 640,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -26,13 +28,14 @@ def collect_candidates(
     w = max(1, int(src_w * scale))
     h = max(1, int(src_h * scale))
     max_frames = int(max_seconds * fps) if fps > 1 else n
+    limit = min(max_frames, n) if n > 0 else max_frames
     step = 2 if fps >= 40 else 1
 
     bg = cv2.createBackgroundSubtractorMOG2(history=120, varThreshold=28, detectShadows=False)
     kernel = np.ones((3, 3), np.uint8)
     frames: list[dict[str, Any]] = []
     idx = 0
-    while idx < max_frames:
+    while idx < limit:
         ok, frame = cap.read()
         if not ok:
             break
@@ -45,6 +48,8 @@ def collect_candidates(
             cands = _blobs(mask, 1.0 / scale)
             frames.append({"frame": idx, "candidates": cands})
         idx += 1
+        if on_progress:
+            on_progress(*((idx, limit) if limit > 0 else (idx, idx + 40)))
     cap.release()
     meta = {
         "fps": fps,
@@ -72,7 +77,12 @@ def _blobs(mask: np.ndarray, to_src: float) -> list[dict[str, Any]]:
         if radius < min_r or radius > max_r:
             continue
         circularity = area / (np.pi * radius * radius + 1e-6)
-        if circularity < 0.22:
+        bx, by, bw, bh = cv2.boundingRect(c)
+        thin = float(min(bw, bh))
+        long = float(max(bw, bh))
+        aspect = long / max(thin, 1.0)
+        streak = aspect >= 1.7 and circularity >= 0.04
+        if circularity < 0.10 and not streak:
             continue
         out.append(
             {
@@ -80,6 +90,7 @@ def _blobs(mask: np.ndarray, to_src: float) -> list[dict[str, Any]]:
                 "y": float(cy * to_src),
                 "r": float(radius * to_src),
                 "score": float(circularity),
+                "streak": streak,
             }
         )
     out.sort(key=lambda d: d["score"], reverse=True)

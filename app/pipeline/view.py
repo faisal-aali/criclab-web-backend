@@ -198,7 +198,7 @@ def flight_is_trackable(
     snap to it, and the gravity timebase loses its only input. Speed is refused
     separately, by `flight_geometry_ok`, with its own reason.
     """
-    if not ball_track or len(ball_track) < 6:
+    if not ball_track or len(ball_track) < 5:
         return False, "Ball path too short to be a flight"
     pts = sorted(ball_track, key=lambda p: int(p["frame"]))
     net = float(np.hypot(
@@ -223,7 +223,7 @@ def flight_geometry_ok(
     rate_is_certain: bool = False,
 ) -> tuple[bool, str]:
     """Can this flight support an image-plane km/h? (Not: is it a real flight.)"""
-    if not ball_track or len(ball_track) < 6:
+    if not ball_track or len(ball_track) < 5:
         return False, "Ball path too short to measure speed"
     pts = sorted(ball_track, key=lambda p: int(p["frame"]))
     net_x = abs(float(pts[-1]["x"]) - float(pts[0]["x"]))

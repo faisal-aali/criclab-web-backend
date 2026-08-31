@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import traceback
 from pathlib import Path
 
 from typing import Any
@@ -12,6 +13,7 @@ from app.api.deps import CurrentUser, VerifiedUser, visible_to
 from app.config import get_settings
 from app.db import repository as repo
 from app.pipeline.eta import estimate_eta_seconds
+from app.pipeline.job_progress import JobReporter
 from app.pipeline.profile import parse_player_profile
 from app.pipeline.runner import run_analysis_job
 from app.services import cloudinary_service
@@ -36,8 +38,13 @@ async def _store_incoming_video(
     file: UploadFile | None,
     source_url: str | None,
     original_name: str | None,
-) -> tuple[str, str | None]:
-    """Write a clip to `dest` from a local upload or a Cloudinary URL."""
+) -> tuple[Path, str, str | None]:
+    """Write a local upload now, or return a Cloudinary URL to fetch in the job.
+
+    Fetching the remote clip inside this request blocked POST /videos — the UI
+    sat on "Uploading…" with no job to poll. The background task reports ingest
+    progress instead.
+    """
     url = (source_url or "").strip()
     if url:
         if not cloudinary_service.is_cloudinary_url(url):
@@ -46,14 +53,8 @@ async def _store_incoming_video(
         if suffix not in _VIDEO_SUFFIXES:
             suffix = ".mp4"
         dest = dest.with_suffix(suffix)
-        try:
-            await cloudinary_service.download_to_path(url, dest)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(502, "Could not fetch the uploaded video") from exc
         name = original_name or Path(urlparse_path(url)).name or dest.name
-        return str(dest), name
+        return dest, name, url
 
     if not file or not file.filename:
         raise HTTPException(400, "Attach a video or a source_url")
@@ -64,7 +65,7 @@ async def _store_incoming_video(
     dest.parent.mkdir(parents=True, exist_ok=True)
     with dest.open("wb") as out:
         shutil.copyfileobj(file.file, out)
-    return str(dest), file.filename
+    return dest, file.filename, None
 
 
 def urlparse_path(url: str) -> str:
@@ -113,20 +114,19 @@ async def upload_video(
 
     video_id = repo.new_id("vid")
     job_id = repo.new_id("job")
-    path, stored_name = await _store_incoming_video(
+    dest, stored_name, remote_url = await _store_incoming_video(
         dest=videos_dir / video_id,
         file=file,
         source_url=source_url,
         original_name=original_name,
     )
-    dest = Path(path)
 
     video_doc = {
         "_id": video_id,
         "user_id": user["_id"],
         "original_name": stored_name,
         "path": str(dest),
-        "source_url": (source_url or "").strip() or None,
+        "source_url": remote_url,
         "content_type": (file.content_type if file else "video/mp4"),
         "player_name": profile["player_name"],
         "player_profile": profile,
@@ -149,10 +149,11 @@ async def upload_video(
     await repo.insert_job(job_doc)
 
     background_tasks.add_task(
-        run_analysis_job,
+        _run_video_job,
         job_id=job_id,
         video_id=video_id,
-        video_path=dest,
+        dest=dest,
+        remote_url=remote_url,
         player_name=profile["player_name"],
         meters_per_pixel=profile.get("meters_per_pixel"),
         reference_height_m=profile["height_m"],
@@ -161,6 +162,58 @@ async def upload_video(
     )
 
     return {"video_id": video_id, "job_id": job_id, "status": "queued"}
+
+
+async def _run_video_job(
+    *,
+    job_id: str,
+    video_id: str,
+    dest: Path,
+    remote_url: str | None,
+    player_name: str,
+    meters_per_pixel: float | None,
+    reference_height_m: float | None,
+    player_profile: dict[str, Any],
+    user_id: str | None,
+) -> None:
+    if remote_url:
+        progress = JobReporter(job_id)
+        try:
+            await progress.aset("ingest", 0, "Fetching your clip", force=True)
+
+            async def on_dl(written: int, total: int | None) -> None:
+                tot = int(total or 0)
+                frac = (written / tot) if tot else 0.0
+                mb_w = written / (1024 * 1024)
+                if tot:
+                    msg = f"Fetching your clip — {mb_w:.1f} of {tot / (1024 * 1024):.1f} MB"
+                    detail = {"current": written, "total": tot, "unit": "bytes"}
+                else:
+                    msg = f"Fetching your clip — {mb_w:.1f} MB"
+                    detail = {"current": written, "total": written, "unit": "bytes"}
+                await progress.aset("ingest", frac, msg, detail=detail)
+
+            await cloudinary_service.download_to_path(remote_url, dest, on_progress=on_dl)
+        except Exception as exc:
+            await repo.update_job(
+                job_id,
+                status="failed",
+                stage="ingest",
+                message=str(exc),
+                error=traceback.format_exc(),
+            )
+            return
+
+    await run_analysis_job(
+        job_id=job_id,
+        video_id=video_id,
+        video_path=dest,
+        player_name=player_name,
+        meters_per_pixel=meters_per_pixel,
+        reference_height_m=reference_height_m,
+        player_profile=player_profile,
+        user_id=user_id,
+    )
 
 
 @router.get("/jobs/{job_id}")

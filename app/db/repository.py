@@ -27,8 +27,14 @@ async def insert_job(doc: dict[str, Any]) -> str:
 
 async def update_job(job_id: str, **fields: Any) -> None:
     db = get_db()
-    fields["updated_at"] = utcnow()
-    await db.jobs.update_one({"_id": job_id}, {"$set": fields})
+    now = utcnow()
+    fields["updated_at"] = now
+    update: dict[str, Any] = {"$set": fields}
+    # First processing write stamps started_at; later writes keep the earlier
+    # value ($min). ETA then measures analysis, not time spent in the queue.
+    if fields.get("status") in (None, "processing", "analyzing"):
+        update["$min"] = {"started_at": now}
+    await db.jobs.update_one({"_id": job_id}, update)
 
 
 async def get_job(job_id: str) -> dict[str, Any] | None:

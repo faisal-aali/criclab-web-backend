@@ -7,6 +7,7 @@ the output. Same metrics JSON as the results page and PDF.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -169,6 +170,7 @@ def render_overlay_video(
     release_still_path: Path | None = None,
     stills_dir: Path | None = None,
     capture_fps: float | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -319,6 +321,8 @@ def render_overlay_video(
             writer.write(frame)
             frames_written += 1
         idx += 1
+        if on_progress and total_frames:
+            on_progress(min(idx, total_frames), total_frames)
 
     writer.release()
     cap.release()

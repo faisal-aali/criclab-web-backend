@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import random
+from collections.abc import Callable
 from typing import Any
 
 import cv2
@@ -169,6 +170,7 @@ def track_ball_from_release(
     throw_dir: tuple[float, float] | None = None,
     body_segments: dict[int, list[tuple[float, float, float, float]]] | None = None,
     body_margin: float = 0.0,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Track the ball in the air after release, one breakpoint per frame.
 
@@ -236,6 +238,19 @@ def track_ball_from_release(
     min_down = 8.0 * px
     downrange_r = 28.0 * px
     turf_below_hand = 100.0 * px
+    n_scan = max(1, int(end) - int(start) + 1)
+
+    def _emit_progress(current: int, *, fitting: bool = False) -> None:
+        if not on_progress:
+            return
+        if fitting:
+            on_progress(n_scan, n_scan)
+            return
+        # Hold the last tick until path fitting finishes so the step bar is not
+        # full with a spinner while greedy/RANSAC still run.
+        shown = current if current < n_scan else max(1, n_scan - 1)
+        on_progress(shown, n_scan)
+
     for idx, bgr in extract.iter_frame_range(video_path, start, end):
         elapsed = max(0, idx - int(release_frame))
         segs = (body_segments or {}).get(int(idx)) or []
@@ -275,7 +290,9 @@ def track_ball_from_release(
                     continue
             filtered.append(c)
         per_frame.append({"frame": int(idx), "candidates": filtered})
+        _emit_progress(int(idx) - start + 1)
 
+    _emit_progress(n_scan, fitting=True)
     # Two independent ways to find the flight, because each fails differently.
     # Greedy chaining follows the nearest candidate and can be captured by a big
     # arm or torso blob near release; ballistic RANSAC is order-independent and
@@ -289,7 +306,7 @@ def track_ball_from_release(
         directional,
     )
     for greedy in greedy_paths:
-        if len(greedy) >= 6:
+        if len(greedy) >= 5:
             seeds.append(greedy)
             # A 50-frame hybrid is mostly poster; ballistic_clean then keeps the
             # crawl and the in-air burst (first ~12 frames) is thrown away as
@@ -297,10 +314,10 @@ def track_ball_from_release(
             # on its own so the leave-hand flight can survive.
             if len(greedy) >= 16:
                 head = greedy[:12]
-                if int(head[-1]["frame"]) - int(head[0]["frame"]) >= 6:
+                if int(head[-1]["frame"]) - int(head[0]["frame"]) >= 5:
                     seeds.append(head)
-    ransac = build_trajectory(per_frame, frame_w, frame_h, min_len=6)
-    if len(ransac) >= 6:
+    ransac = build_trajectory(per_frame, frame_w, frame_h, min_len=5)
+    if len(ransac) >= 5:
         seeds.append([_point(p["frame"], p) for p in ransac])
     if os.environ.get("CRICLAB_TRACK_DEBUG"):
         print(f"greedy_n={len(greedy_paths)} ransac_n={len(ransac)} seeds={len(seeds)}", flush=True)
@@ -335,20 +352,24 @@ def track_ball_from_release(
                     flush=True,
                 )
         cand = _longest_continuous(seed)
-        if len(cand) < 6:
-            _why("continuous<6")
+        cand = _trim_lost_lock(cand)
+        if len(cand) < 5:
+            _why("continuous<5")
             continue
         cand = _ballistic_clean(cand, frame_w, frame_h)
-        if len(cand) < 6:
-            _why("clean<6")
+        cand = _trim_lost_lock(cand)
+        if len(cand) < 5:
+            _why("clean<5")
             continue
         cand = _reassociate(per_frame, cand, frame_w, frame_h)
         cand = _ballistic_clean(cand, frame_w, frame_h)
         cand = _longest_continuous(cand)
-        if len(cand) < 6:
-            _why("reassoc<6")
+        cand = _trim_lost_lock(cand)
+        if len(cand) < 5:
+            _why("reassoc<5")
             continue
         cand = _extend_backward(per_frame, cand, hand_x, hand_y, frame_w, frame_h, fps)
+        cand = _trim_lost_lock(cand)
         if int(cand[0]["frame"]) > max_start:
             _why(f"late_start f{cand[0]['frame']}")
             continue
@@ -372,9 +393,10 @@ def track_ball_from_release(
             _why(f"geo {geo_note}")
             continue
         cand = _refine_centroids(video_path, cand, frame_w, frame_h)
+        cand = _trim_lost_lock(cand)
         detected = [p for p in cand if p.get("source") != "interpolated"]
         cand = fill_every_frame(cand)
-        flow_pts = detected if len(detected) >= 6 else cand
+        flow_pts = detected if len(detected) >= 5 else cand
         ok_flow, flow_note, flow_stats = validate_ball_path_on_video(video_path, flow_pts, frame_w, frame_h)
         if not ok_flow:
             _why(f"flow {flow_note} {flow_stats}")
@@ -386,7 +408,10 @@ def track_ball_from_release(
             best_key, best = key, cand
             best[0]["flow_note"] = flow_note
             best[0]["flow_stats"] = flow_stats
-    if len(best) < 6:
+    if len(best) < 5:
+        return []
+    best = _trim_lost_lock(best)
+    if len(best) < 5:
         return []
     # No km/h floor here: `fps` at this point is the *container* rate, which a
     # slow-motion export understates by 4-8x. Gating on km/h would throw away
@@ -440,11 +465,15 @@ def _longest_continuous(path: list[dict[str, Any]]) -> list[dict[str, Any]]:
         _dist(a, b) / max(1, int(b["frame"]) - int(a["frame"]))
         for a, b in zip(pts, pts[1:])
     ]
-    med = float(np.median(steps))
+    # Typical step = median of the *smaller* half. Median of every step lets two
+    # teleports (lost ball, wrong blob) inflate the cut so a later 400 px lock-on
+    # still counts as "continuous" and the speed fit is then refused as garbage.
+    ordered = sorted(steps)
+    typical = float(np.median(ordered[: max(1, (len(ordered) + 1) // 2)]))
     # A floor in absolute pixels loosens this test exactly where it matters: on a
     # high-frame-rate clip the ball steps only 5-12 px, so a 40 px floor lets a
     # flare eight times the real step splice into the track.
-    limit = max(3.0 * med, 2.0 * _track_ball_r(pts))
+    limit = max(2.5 * typical, 2.0 * _track_ball_r(pts))
     runs: list[list[dict[str, Any]]] = [[pts[0]]]
     for step, nxt in zip(steps, pts[1:]):
         if step <= limit:
@@ -452,6 +481,61 @@ def _longest_continuous(path: list[dict[str, Any]]) -> list[dict[str, Any]]:
         else:
             runs.append([nxt])
     return max(runs, key=len)
+
+
+def _trim_lost_lock(path: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop the tail once the lock stops travelling along its own heading.
+
+    After the ball blurs out (three-quarter / 4K / 120 fps), the nearest blob
+    is often turf or a bounce. Consecutive steps are still small, so
+    `_longest_continuous` will not cut, but x-velocity collapses and the speed
+    fit then reports garbage (or refuses the number). Cut at the first stall
+    after a stable head of in-air samples.
+    """
+    if len(path) < 5:
+        return path
+    pts = sorted(
+        (p for p in path if p.get("source") != "interpolated"),
+        key=lambda p: int(p["frame"]),
+    )
+    if len(pts) < 5:
+        pts = sorted(path, key=lambda p: int(p["frame"]))
+    if len(pts) < 5:
+        return path
+    dxs: list[float] = []
+    for a, b in zip(pts, pts[1:]):
+        df = max(1, int(b["frame"]) - int(a["frame"]))
+        dxs.append((float(b["x"]) - float(a["x"])) / df)
+    typical = float(np.median(dxs[: min(4, len(dxs))]))
+    if abs(typical) < 8.0:
+        return path
+    sign = 1.0 if typical >= 0 else -1.0
+    cut = len(pts)
+    for i, dx in enumerate(dxs):
+        # Need five in-air samples before judging a stall, so a short blurry
+        # flight is kept rather than discarded as "too short to be a ball".
+        if i + 1 < 5:
+            continue
+        if sign * dx < 0.22 * abs(typical):
+            cut = i + 1
+            break
+    kept = pts[:cut]
+    if len(kept) < 5:
+        return path
+    # A first sample that sits well off the flight in y is usually a lock-on
+    # from the hand or a flare, not leave-hand. Dropping it is what lets a
+    # 9-point lost-ball clip (y=600 then a flat y=703 flight) quote a speed.
+    rest = kept[1 : min(6, len(kept))]
+    if len(kept) > 5 and len(rest) >= 4:
+        ys = np.array([float(p["y"]) for p in rest], dtype=float)
+        med_y = float(np.median(ys))
+        mad_y = float(np.median(np.abs(ys - med_y))) or 1.0
+        if abs(float(kept[0]["y"]) - med_y) > max(48.0, 4.0 * mad_y):
+            kept = kept[1:]
+    last_f = int(kept[-1]["frame"])
+    first_f = int(kept[0]["frame"])
+    out = [p for p in path if first_f <= int(p["frame"]) <= last_f]
+    return out if len(out) >= 5 else path
 
 
 def _reassociate(
@@ -626,6 +710,26 @@ def _greedy_chain(
             if misses >= 4:
                 break
             continue
+        # After a stable lock, a pick that stops travelling downrange is turf /
+        # bounce / a blurred smear — not the ball. Treating it as a miss cuts
+        # the lost-lock tail that otherwise poisons the speed fit.
+        if len(path) >= 5:
+            step_dx = [
+                (float(path[j]["x"]) - float(path[j - 1]["x"]))
+                / max(1, int(path[j]["frame"]) - int(path[j - 1]["frame"]))
+                for j in range(1, len(path))
+            ]
+            typical_dx = float(np.median(step_dx[: min(4, len(step_dx))]))
+            if abs(typical_dx) >= 8.0:
+                df_obs = max(1, int(item["frame"]) - int(path[-1]["frame"]))
+                obs_dx = (float(picked["x"]) - float(path[-1]["x"])) / df_obs
+                if obs_dx * (1.0 if typical_dx >= 0 else -1.0) < 0.22 * abs(typical_dx):
+                    picked = None
+        if picked is None:
+            misses += 1
+            if misses >= 4:
+                break
+            continue
         misses = 0
         df = max(1, int(item["frame"]) - int(path[-1]["frame"]))
         vx = (picked["x"] - path[-1]["x"]) / df
@@ -774,7 +878,7 @@ def _best_flight_path(
             per_frame, i, c, max_step,
             compact_r=max(24.0, cricket_r * 2.5), cricket_r=cricket_r,
         )
-        if len(chain) < 6:
+        if len(chain) < 5:
             continue
         net = _dist(chain[0], chain[-1])
         if net < min_net:
@@ -833,7 +937,7 @@ def _ballistic_clean(path: list[dict[str, Any]], frame_w: int, frame_h: int) -> 
     the residuals lets a clean track reject tightly and a noisy one stay
     tolerant.
     """
-    if len(path) < 6:
+    if len(path) < 5:
         return path
     current = sorted(path, key=lambda p: int(p["frame"]))
     diag = float(np.hypot(frame_w, frame_h))
@@ -854,7 +958,7 @@ def _ballistic_clean(path: list[dict[str, Any]], frame_w: int, frame_h: int) -> 
         mad = float(np.median(np.abs(res - np.median(res))))
         tol = float(np.clip(float(np.median(res)) + 3.0 * 1.4826 * mad, floor, ceiling))
         kept = [p for p, d in zip(current, res) if d <= tol]
-        if len(kept) < 6:
+        if len(kept) < 5:
             return current
         if len(kept) == len(current):
             return current
@@ -1193,11 +1297,28 @@ def robust_release_velocity_px_per_frame(
     if len(pts) < 5:
         return None
 
-    t0 = int(pts[0]["frame"]) if release_frame is None else int(release_frame)
-    # Stay near release: the ball is still at the bowler's own depth plane there,
-    # which is the plane the height scale actually calibrates.
+    # Cut a lost-lock tail before choosing the release window. Fitting the
+    # downward crawl after x-velocity collapsed is what refused the last
+    # three-quarter clip as "not a real flight path".
+    pts = _trim_lost_lock(pts)
+    if len(pts) < 5:
+        return None
+
+    first = int(pts[0]["frame"])
+    t0 = first if release_frame is None else int(release_frame)
+    # Stay near leave-hand: the ball is still at the bowler's own depth plane
+    # there, which is the plane the height scale actually calibrates.
     span = max(6, int(round(float(fps) * 0.12)))
-    early = [p for p in pts if 0 <= int(p["frame"]) - t0 <= span]
+    # Pose REL is often a few frames after the ball is already free. Those
+    # earlier detections are the real leave-hand samples.
+    pre = max(4, int(round(float(fps) * 0.05)))
+    early = [p for p in pts if -pre <= int(p["frame"]) - t0 <= span]
+    if len(early) < 5:
+        # Detections started after the window. Measuring from release
+        # then falls through to the whole remaining path — including a lost-ball
+        # tail. The first in-air sample is the nearest depth plane we have.
+        t0 = first
+        early = [p for p in pts if 0 <= int(p["frame"]) - t0 <= span]
     if len(early) < 5:
         early = pts[: max(5, min(14, len(pts)))]
     if len(early) < 5:

@@ -13,6 +13,7 @@ not support Python 3.13/3.14.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,7 @@ def extract_pose_track(
     *,
     max_frames: int = 1200,
     model_complexity: int = 1,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     """Run pose estimation over the clip and return a serialisable pose track.
 
@@ -118,6 +120,12 @@ def extract_pose_track(
                     ]
                     frames.append({"frame": int(idx), "landmarks": landmarks})
             idx += 1
+            if on_progress:
+                if total > 0:
+                    on_progress(min(idx, total), total)
+                else:
+                    # OpenCV sometimes reports FRAME_COUNT=0. Never claim 100%.
+                    on_progress(idx, idx + 40)
     finally:
         pose.close()
         cap.release()

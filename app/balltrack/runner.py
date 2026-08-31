@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import traceback
 from pathlib import Path
 from typing import Any
@@ -16,17 +17,29 @@ from app.balltrack.track import build_tracks
 from app.balltrack.validate import reject_reason
 from app.config import get_settings
 from app.pipeline.cv_vision import validate_ball_path_on_video
+from app.pipeline.job_progress import BALLTRACK_BANDS, JobReporter, clamp_counts
 
 
 async def run_balltrack_job(*, job_id: str, session_id: str, video_path: Path, calibration: dict[str, Any]) -> None:
     settings = get_settings()
+    progress = JobReporter(job_id, bands=BALLTRACK_BANDS, update=repo.update_job)
     try:
-        await repo.update_job(job_id, status="processing", progress=8, stage="calibrate", message="Building pitch homography")
+        await progress.aset("calibrate", 0, "Measuring the pitch", force=True)
         art = settings.storage_path / "balltrack" / job_id
         art.mkdir(parents=True, exist_ok=True)
 
-        await repo.update_job(job_id, progress=18, stage="detect", message="Finding the ball")
-        frames, meta = collect_candidates(video_path)
+        await progress.aset("detect", 0, "Finding the ball", force=True)
+
+        def on_detect(cur: int, tot: int) -> None:
+            cur, tot = clamp_counts(cur, tot)
+            progress.emit(
+                "detect",
+                cur / tot,
+                f"Finding the ball — frame {cur} of {tot}",
+                detail={"current": cur, "total": tot, "unit": "frames"},
+            )
+
+        frames, meta = await asyncio.to_thread(collect_candidates, video_path, on_progress=on_detect)
         fps = float(meta["fps"] or 30.0)
         w, h = int(meta["width"]), int(meta["height"])
         if w < 16 or h < 16:
@@ -41,18 +54,30 @@ async def run_balltrack_job(*, job_id: str, session_id: str, video_path: Path, c
         )
         H = np.array(cal["H"], dtype=np.float64)
 
-        await repo.update_job(job_id, progress=40, stage="track", message="Fitting ball trajectories")
-        tracks = build_tracks(frames, w, h, fps=fps)
+        await progress.aset("track", 0, "Following each delivery", force=True)
+        tracks = await asyncio.to_thread(build_tracks, frames, w, h, fps)
         deliveries_pts = split_deliveries(tracks, fps)
         if not deliveries_pts:
             raise ValueError(
                 "No cricket ball detected. Film a real delivery down the pitch — empty or walking clips will not produce a speed."
             )
 
-        await repo.update_job(job_id, progress=58, stage="metrics", message=f"Checking {len(deliveries_pts)} candidate paths")
+        n_paths = len(deliveries_pts)
+        await progress.aset(
+            "metrics",
+            0,
+            f"Measuring {n_paths} candidate path{'s' if n_paths != 1 else ''}",
+            force=True,
+        )
         analyzed: list[dict[str, Any]] = []
         delivery_ids: list[str] = []
-        for pts in deliveries_pts:
+        for i_path, pts in enumerate(deliveries_pts):
+            await progress.aset(
+                "metrics",
+                (i_path + 1) / max(n_paths, 1),
+                f"Measuring path {i_path + 1} of {n_paths}",
+                detail={"current": i_path + 1, "total": n_paths, "unit": "paths"},
+            )
             metrics = analyze_delivery(
                 pts,
                 H,
@@ -119,7 +144,7 @@ async def run_balltrack_job(*, job_id: str, session_id: str, video_path: Path, c
                 "No cricket ball detected. Nothing in this clip looked like a delivery (speed, bounce, and path toward the batter must all check out)."
             )
 
-        await repo.update_job(job_id, progress=78, stage="render", message="Rendering overlay and pitch map")
+        await progress.aset("render", 0, "Drawing the path onto your clip", force=True)
         overlay_path = art / "overlay.mp4"
         H_inv = np.array(cal["H_inv"], dtype=np.float64)
         write_overlay(
@@ -146,7 +171,7 @@ async def run_balltrack_job(*, job_id: str, session_id: str, video_path: Path, c
             "cloudinary_pitch_map_url": (map_cloud or {}).get("secure_url"),
         }
 
-        await repo.update_job(job_id, progress=90, stage="agent", message="Coaching drills from measured line and length")
+        await progress.aset("agent", 0, "Matching drills to what we saw", force=True)
         from app.agent import ollama_agent
         from app.coaching.recommend import balltrack_tags
 

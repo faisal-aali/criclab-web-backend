@@ -10,6 +10,7 @@ Order (see memory-bank/systemPatterns.md):
 
 from __future__ import annotations
 
+import asyncio
 import traceback
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from app.pipeline import calibrate, extract, pose as pose_mod
 from app.pipeline import metrics as metrics_mod
 from app.pipeline import render as render_mod
 from app.pipeline import timebase, track
+from app.pipeline.job_progress import JobReporter, clamp_counts
 from app.pipeline.view import flight_is_trackable
 from app.services import cloudinary_service
 
@@ -41,24 +43,44 @@ async def run_analysis_job(
     user_id: str | None = None,
 ) -> None:
     settings = get_settings()
+    progress = JobReporter(job_id)
     try:
-        await repo.update_job(job_id, status="processing", progress=5, stage="extract", message="Reading video metadata")
-        meta = extract.extract_video_meta(video_path)
+        await progress.aset("extract", 0, "Reading video metadata", force=True)
+        meta = await asyncio.to_thread(extract.extract_video_meta, video_path)
         fps = float(meta["fps"] or 30.0)
 
         artifact_dir = settings.storage_path / "artifacts" / job_id
         artifact_dir.mkdir(parents=True, exist_ok=True)
 
-        # --- Pose estimation (the measurement engine) ---
-        await repo.update_job(job_id, status="processing", progress=20, stage="pose", message="Estimating bowler pose (MediaPipe)")
-        pose_track = pose_mod.extract_pose_track(video_path)
+        n_frames = int(meta.get("frame_count") or 0)
+        await progress.aset(
+            "pose",
+            0,
+            f"Mapping the bowler — 0 of {n_frames} frames" if n_frames else "Mapping the bowler",
+            force=True,
+            detail={"current": 0, "total": n_frames, "unit": "frames"} if n_frames else None,
+        )
+
+        def on_pose(cur: int, tot: int) -> None:
+            cur, tot = clamp_counts(cur, tot)
+            progress.emit(
+                "pose",
+                cur / tot,
+                f"Mapping the bowler — frame {cur} of {tot}",
+                detail={"current": cur, "total": tot, "unit": "frames"},
+            )
+
+        pose_track = await asyncio.to_thread(
+            pose_mod.extract_pose_track, video_path, on_progress=on_pose
+        )
         if not pose_track.get("frames"):
             raise ValueError("No bowler pose detected — use a clearer, side-on video of the delivery.")
 
-        # --- Action / release detection ---
-        await repo.update_job(job_id, status="processing", progress=42, stage="action", message="Detecting release & action phases")
+        await progress.aset("action", 0, "Finding the release and action phases", force=True)
         bowling_arm = (player_profile or {}).get("bowling_arm")
-        action = action_mod.analyze_action(pose_track, bowling_arm=bowling_arm)
+        action = await asyncio.to_thread(
+            action_mod.analyze_action, pose_track, bowling_arm=bowling_arm
+        )
 
         # --- Scale from upright (tall) body frames — never crouch-biased median ---
         body_heights = [h for h in (pose_mod.body_pixel_height(f) for f in pose_track["frames"]) if h]
@@ -68,8 +90,24 @@ async def run_analysis_job(
         frame_w = int(meta.get("width") or pose_track.get("width") or 1280)
         frame_h = int(meta.get("height") or pose_track.get("height") or 720)
 
-        await repo.update_job(job_id, status="processing", progress=55, stage="ball", message="Tracking ball flight")
-        ball_track = _track_ball_seeded(video_path, meta, pose_track, action, scale)
+        await progress.aset("ball", 0, "Following the ball after release", force=True)
+
+        def on_ball(cur: int, tot: int) -> None:
+            cur, tot = clamp_counts(cur, tot)
+            fitting = cur >= tot
+            progress.emit(
+                "ball",
+                1.0 if fitting else 0.90 * cur / tot,
+                "Locking onto the flight path"
+                if fitting
+                else f"Following the ball — frame {cur} of {tot}",
+                detail={"current": cur, "total": tot, "unit": "frames"},
+            )
+
+        ball_track = await asyncio.to_thread(
+            _track_ball_seeded, video_path, meta, pose_track, action, scale, on_ball
+        )
+        await progress.aset("ball", 1.0, "Ball path locked", force=True)
 
         # --- Timebase: is the clip slow motion? ---
         # Every phase window ("the front foot plants 60-600 ms before release")
@@ -119,8 +157,9 @@ async def run_analysis_job(
             action_mod.snap_release_to_ball_leave(pose_track, action, ball_track)
 
         # --- Metrics ---
-        await repo.update_job(job_id, status="processing", progress=60, stage="metrics", message="Calculating bowling metrics")
-        metrics = metrics_mod.compute_metrics(
+        await progress.aset("metrics", 0, "Measuring the delivery", force=True)
+        metrics = await asyncio.to_thread(
+            metrics_mod.compute_metrics,
             fps=fps,
             pose_track=pose_track,
             action=action,
@@ -131,11 +170,22 @@ async def run_analysis_job(
         )
 
         # --- Slow-motion overlay video ---
-        await repo.update_job(job_id, status="processing", progress=70, stage="render", message="Rendering slow-motion overlay video")
+        await progress.aset("render", 0, "Marking up the slow-motion clip", force=True)
         overlay_video_path = artifact_dir / "overlay.mp4"
         release_still_path = artifact_dir / "release.jpg"
         stills_dir = artifact_dir / "stills"
-        render_info = render_mod.render_overlay_video(
+
+        def on_render(cur: int, tot: int) -> None:
+            cur, tot = clamp_counts(cur, tot)
+            progress.emit(
+                "render",
+                cur / tot,
+                f"Marking up the clip — frame {cur} of {tot}",
+                detail={"current": cur, "total": tot, "unit": "frames"},
+            )
+
+        render_info = await asyncio.to_thread(
+            render_mod.render_overlay_video,
             video_path=video_path,
             out_path=overlay_video_path,
             pose_track=pose_track,
@@ -146,20 +196,23 @@ async def run_analysis_job(
             release_still_path=release_still_path,
             stills_dir=stills_dir,
             capture_fps=fps,
+            on_progress=on_render,
         )
 
         # --- Upload processed video to Cloudinary ---
-        await repo.update_job(job_id, status="processing", progress=80, stage="upload", message="Uploading processed video to Cloudinary")
+        await progress.aset("upload", 0, "Saving your processed clip", force=True)
         cloud: dict[str, Any] = {"configured": cloudinary_service.is_configured()}
         try:
-            vres = cloudinary_service.upload_video(overlay_video_path, public_id=f"{job_id}_overlay")
+            vres = await asyncio.to_thread(
+                cloudinary_service.upload_video, overlay_video_path, f"{job_id}_overlay"
+            )
             if vres:
                 cloud["video"] = vres
         except Exception as e:  # never fail the whole job on upload error
             cloud["video_error"] = str(e)
 
         # --- Agent narrative ---
-        await repo.update_job(job_id, status="analyzing", progress=86, stage="agent", message="Generating AI coaching analysis")
+        await progress.aset("agent", 0, "Writing your coaching notes", status="analyzing", force=True)
         previous = await repo.list_deliveries(limit=8, player_name=player_name)
         prev_metrics = [d.get("metrics") for d in previous if d.get("metrics")]
         comparison = ollama_agent.compare_deliveries(metrics, prev_metrics[:5])
@@ -171,10 +224,11 @@ async def run_analysis_job(
         )
 
         # --- PDF ---
-        await repo.update_job(job_id, status="analyzing", progress=92, stage="pdf", message="Building PDF report")
+        await progress.aset("pdf", 0, "Building your report", status="analyzing", force=True)
         pdf_path = artifact_dir / "bowling_report.pdf"
         created = repo.utcnow()
-        build_pdf(
+        await asyncio.to_thread(
+            build_pdf,
             out_path=pdf_path,
             player_name=player_name,
             delivery_id=job_id,
@@ -223,6 +277,7 @@ async def run_analysis_job(
 
         await repo.update_job(
             job_id, status="completed", progress=100, stage="done", message="Analysis complete",
+            stage_detail=None,
             delivery_id=delivery_id,
             result={
                 "delivery_id": delivery_id,
@@ -342,6 +397,7 @@ def _track_ball_seeded(
     pose_track: dict[str, Any],
     action: dict[str, Any],
     scale: dict[str, Any],
+    on_progress: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Track the ball leaving the bowling wrist at the detected release frame."""
     try:
@@ -431,6 +487,7 @@ def _track_ball_seeded(
             throw_dir=throw_dir,
             body_segments=segs,
             body_margin=margin,
+            on_progress=on_progress,
         )
     except Exception:
         traceback.print_exc()

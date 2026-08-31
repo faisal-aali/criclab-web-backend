@@ -153,11 +153,15 @@ def collect_flight_candidates(
     bright = detect_bright_flight_candidates(enhanced, enhance=False)
     motion: list[dict[str, Any]] = []
     fast: list[dict[str, Any]] = []
+    faint: list[dict[str, Any]] = []
     if prev_work_gray is not None:
         cricket_r = _cricket_r(*gray.shape[:2])
-        motion = detect_ball_motion_candidates(prev_work_gray, gray, max_r_frac=0.040)
+        motion = detect_ball_motion_candidates(prev_work_gray, gray, max_r_frac=0.055)
         fast = detect_ball_motion_candidates(
             prev_work_gray, gray, threshold=36, max_r_frac=0.032
+        )
+        faint = detect_ball_motion_candidates(
+            prev_work_gray, gray, threshold=14, max_r_frac=0.028
         )
         for c in motion + fast:
             c["source"] = "motion"
@@ -167,9 +171,17 @@ def collect_flight_candidates(
                 c["score"] = float(c.get("score") or 0) + 4.0
             else:
                 c["score"] = float(c.get("score") or 0) + 0.4
+        kept_faint: list[dict[str, Any]] = []
+        for c in faint:
+            c["source"] = "motion"
+            r = float(c.get("r") or 0)
+            if c.get("streak") or r <= cricket_r * 1.4:
+                c["score"] = float(c.get("score") or 0) + 3.2
+                kept_faint.append(c)
+        faint = kept_faint
     hough = hough_ball_candidates(enhanced, enhance=False)
     merged = merge_ball_candidates(
-        dark, color, bright, motion, fast, hough, cricket_r=_cricket_r(*gray.shape[:2])
+        dark, color, bright, motion, fast, faint, hough, cricket_r=_cricket_r(*gray.shape[:2])
     )
     return _scale_candidates(merged, sx, sy), gray
 
@@ -200,15 +212,15 @@ def _blob_candidates(
         thin = float(min(bw, bh))
         long = float(max(bw, bh))
         aspect = long / max(thin, 1.0)
-        # A 120 fps white ball is a streak, not a disc. Keep elongated blobs that
-        # are still cricket-ball-thin; drop shapeless poster patches.
+        # A 120 fps white ball is a streak, not a disc — especially on a
+        # three-quarter / blurry angle where the ball smears along the path.
         streak = (
-            aspect >= 2.2
-            and thin <= cricket_r * 1.6
-            and long <= min(w, h) * 0.14
-            and circularity >= 0.06
+            aspect >= 1.75
+            and thin <= cricket_r * 1.85
+            and long <= min(w, h) * 0.18
+            and circularity >= 0.04
         )
-        if circularity < 0.12 and not streak:
+        if circularity < 0.08 and not streak:
             continue
         # Size-favoring score keeps large training ovals; compact score keeps a
         # 4–16 px cricket ball that posters and floodlight flares would drown.
@@ -277,7 +289,7 @@ def detect_ball_color_candidates(
         cv2.inRange(hsv, (0, 70, 50), (12, 255, 255)),
         cv2.inRange(hsv, (168, 70, 50), (180, 255, 255)),
     )
-    white = cv2.inRange(hsv, (0, 0, 150), (180, 85, 255))
+    white = cv2.inRange(hsv, (0, 0, 132), (180, 100, 255))
     mask = cv2.bitwise_or(red, white)
     # Floodlight streaks live in the top of night clips. Skipped on ROI crops,
     # where "the top of the frame" is not the top of the scene.
@@ -302,7 +314,7 @@ def detect_bright_flight_candidates(
     h, w = bgr.shape[:2]
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    white = cv2.inRange(hsv, (0, 0, 145), (180, 90, 255))
+    white = cv2.inRange(hsv, (0, 0, 132), (180, 100, 255))
     k = int(round(min(h, w) * 0.014))
     if k % 2 == 0:
         k += 1
@@ -335,6 +347,7 @@ def detect_ball_motion_candidates(
     _, mask = cv2.threshold(diff, int(threshold), 255, cv2.THRESH_BINARY)
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask = cv2.dilate(mask, kernel, iterations=1)
     return _blob_candidates(mask, max_candidates=32, max_r_frac=max_r_frac)
 
 
