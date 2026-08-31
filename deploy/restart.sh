@@ -49,16 +49,37 @@ fi
 source .venv312/bin/activate
 python -m pip install -q --upgrade pip
 pip install -q -r requirements.txt
+python -c "import uvicorn, fastapi"
 
 if ! command -v pm2 >/dev/null 2>&1; then
   echo "pm2 is not on PATH for $(whoami). Install: npm i -g pm2" >&2
   exit 1
 fi
 
-pm2 startOrReload "${ROOT}/deploy/ecosystem.config.cjs" --update-env
+chmod +x "${ROOT}/deploy/start-api.sh"
+
+# Reload keeps the *old* PM2 command (whatever first created criclab-api).
+# Delete + start applies deploy/ecosystem.config.cjs so we actually run uvicorn.
+pm2 delete criclab-api >/dev/null 2>&1 || true
+pm2 start "${ROOT}/deploy/ecosystem.config.cjs" --update-env
 pm2 save
 
-sleep 2
-curl -fsS --max-time 20 http://127.0.0.1:8000/health
+ok=""
+for _ in $(seq 1 30); do
+  if curl -fsS --max-time 2 http://127.0.0.1:8000/health >/dev/null 2>&1; then
+    ok=1
+    break
+  fi
+  sleep 2
+done
+
+if [[ -z "$ok" ]]; then
+  echo "API did not listen on 127.0.0.1:8000. Last PM2 output:" >&2
+  pm2 describe criclab-api || true
+  pm2 logs criclab-api --nostream --lines 80 || true
+  exit 1
+fi
+
+curl -fsS --max-time 10 http://127.0.0.1:8000/health
 echo
 echo "criclab-api restarted from ${ROOT}"
