@@ -10,7 +10,7 @@ PORT="${PORT:-8000}"
 HOST="${HOST:-0.0.0.0}"
 
 if ! command -v python3.12 &>/dev/null; then
-  echo "python3.12 not found. Install Python 3.12 (MediaPipe does not work on 3.13+)." >&2
+  echo "python3.12 not found. Install Python 3.12." >&2
   exit 1
 fi
 

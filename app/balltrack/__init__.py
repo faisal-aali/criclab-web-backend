@@ -1,1 +1,1 @@
-"""Isolated Fulltrack-style ball tracking. Do not import app.pipeline (pose)."""
+"""Ball-flight sessions: Mongo repo plus still-photo stump calibration for the UI."""

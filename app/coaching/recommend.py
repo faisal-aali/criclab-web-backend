@@ -192,24 +192,6 @@ def weakness_tags(metrics: dict[str, Any] | None = None, *, extra: list[str] | N
     return tags
 
 
-def balltrack_tags(deliveries: list[dict[str, Any]]) -> list[str]:
-    """Line/length tags from stump-calibrated pitch-plane metrics."""
-    tags: list[str] = []
-    for d in deliveries:
-        m = d.get("metrics") or d
-        length = _metric_ok(m, "length_m")
-        line = _metric_ok(m, "line_m")
-        if length:
-            lv = float(length["value"])
-            if lv < 8.0 or lv > 16.5:
-                if "length" not in tags:
-                    tags.append("length")
-        if line and abs(float(line["value"])) > 0.45:
-            if "line" not in tags:
-                tags.append("line")
-    return tags
-
-
 def fallback_picks(tags: list[str], *, limit: int = 3) -> list[dict[str, Any]]:
     catalog = load_catalog()
     by_id = catalog_by_id()

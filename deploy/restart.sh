@@ -26,7 +26,7 @@ pick_python() {
   case "$ver" in
     3.10|3.11|3.12) echo "$cmd" ;;
     *)
-      echo "Need Python 3.10–3.12 for MediaPipe (found $cmd = $ver)." >&2
+      echo "Need Python 3.10–3.12 (found $cmd = $ver)." >&2
       exit 1
       ;;
   esac

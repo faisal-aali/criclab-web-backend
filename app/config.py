@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     # Where links in emails point — the frontend, not this API.
     app_base_url: str = "http://localhost:5173"
 
-    # Cloudinary (processed video + PDF hosting)
+    # Cloudinary (signed browser upload — overlay/PDF upload is the video service)
     cloudinary_url: str | None = None
     cloudinary_cloud_name: str | None = None
     cloudinary_api_key: str | None = None
