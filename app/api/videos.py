@@ -1,21 +1,18 @@
 from __future__ import annotations
 
 import shutil
-import traceback
 from pathlib import Path
 
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.api.deps import CurrentUser, VerifiedUser, visible_to
 from app.config import get_settings
 from app.db import repository as repo
 from app.pipeline.eta import estimate_eta_seconds
-from app.pipeline.job_progress import JobReporter
 from app.pipeline.profile import parse_player_profile
-from app.pipeline.runner import run_analysis_job
 from app.services import cloudinary_service
 
 router = APIRouter(tags=["analysis"])
@@ -77,7 +74,6 @@ def urlparse_path(url: str) -> str:
 @router.post("/videos")
 async def upload_video(
     user: VerifiedUser,
-    background_tasks: BackgroundTasks,
     file: UploadFile | None = File(None),
     source_url: str | None = Form(None),
     original_name: str | None = Form(None),
@@ -147,73 +143,37 @@ async def upload_video(
         "updated_at": repo.utcnow(),
     }
     await repo.insert_job(job_doc)
-
-    background_tasks.add_task(
-        _run_video_job,
-        job_id=job_id,
-        video_id=video_id,
-        dest=dest,
-        remote_url=remote_url,
-        player_name=profile["player_name"],
-        meters_per_pixel=profile.get("meters_per_pixel"),
-        reference_height_m=profile["height_m"],
-        player_profile=profile,
-        user_id=user["_id"],
-    )
+    # criclab-video-service workers claim queued jobs. This API does not run CV.
 
     return {"video_id": video_id, "job_id": job_id, "status": "queued"}
 
 
-async def _run_video_job(
-    *,
-    job_id: str,
-    video_id: str,
-    dest: Path,
-    remote_url: str | None,
-    player_name: str,
-    meters_per_pixel: float | None,
-    reference_height_m: float | None,
-    player_profile: dict[str, Any],
-    user_id: str | None,
-) -> None:
-    if remote_url:
-        progress = JobReporter(job_id)
-        try:
-            await progress.aset("ingest", 0, "Fetching your clip", force=True)
+def _public_job(job: dict[str, Any], *, kind: str, eta: int | None) -> dict[str, Any]:
+    out = dict(job)
+    out["id"] = out.pop("_id")
+    out["kind"] = kind
+    out["eta_seconds"] = eta
+    return out
 
-            async def on_dl(written: int, total: int | None) -> None:
-                tot = int(total or 0)
-                frac = (written / tot) if tot else 0.0
-                mb_w = written / (1024 * 1024)
-                if tot:
-                    msg = f"Fetching your clip — {mb_w:.1f} of {tot / (1024 * 1024):.1f} MB"
-                    detail = {"current": written, "total": tot, "unit": "bytes"}
-                else:
-                    msg = f"Fetching your clip — {mb_w:.1f} MB"
-                    detail = {"current": written, "total": written, "unit": "bytes"}
-                await progress.aset("ingest", frac, msg, detail=detail)
 
-            await cloudinary_service.download_to_path(remote_url, dest, on_progress=on_dl)
-        except Exception as exc:
-            await repo.update_job(
-                job_id,
-                status="failed",
-                stage="ingest",
-                message=str(exc),
-                error=traceback.format_exc(),
-            )
-            return
+@router.get("/jobs/active")
+async def list_active_jobs(user: CurrentUser):
+    """In-flight Action + Ball flight jobs for the header progress icon."""
+    from app.balltrack import repo as bt_repo
 
-    await run_analysis_job(
-        job_id=job_id,
-        video_id=video_id,
-        video_path=dest,
-        player_name=player_name,
-        meters_per_pixel=meters_per_pixel,
-        reference_height_m=reference_height_m,
-        player_profile=player_profile,
-        user_id=user_id,
-    )
+    action = await repo.list_active_jobs(user["_id"])
+    flight = await bt_repo.list_active_jobs(user["_id"])
+    items = []
+    for job in action:
+        eta = await estimate_eta_seconds(collection="jobs", pipeline="action", job=job)
+        items.append(_public_job(job, kind="action", eta=eta))
+    for job in flight:
+        eta = await estimate_eta_seconds(
+            collection="balltrack_jobs", pipeline="ballflight", job=job
+        )
+        items.append(_public_job(job, kind="ballflight", eta=eta))
+    items.sort(key=lambda j: str(j.get("created_at") or ""), reverse=True)
+    return {"items": items}
 
 
 @router.get("/jobs/{job_id}")

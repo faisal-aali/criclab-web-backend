@@ -4,12 +4,11 @@ import json
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.api.deps import CurrentUser, VerifiedUser, visible_to
 from app.balltrack import repo
-from app.balltrack.runner import run_balltrack_job
 from app.balltrack.stumps import detect_stump_sets
 from app.config import get_settings
 from app.pipeline.eta import estimate_eta_seconds
@@ -78,7 +77,6 @@ def _public_delivery(d: dict) -> dict:
 @router.post("/sessions")
 async def create_session(
     user: VerifiedUser,
-    background_tasks: BackgroundTasks,
     file: UploadFile | None = File(None),
     source_url: str | None = Form(None),
     original_name: str | None = Form(None),
@@ -103,6 +101,7 @@ async def create_session(
     dest = videos_dir / session_id
     url = (source_url or "").strip()
     stored_name = original_name
+    remote_url: str | None = None
     if url:
         if not cloudinary_service.is_cloudinary_url(url):
             raise HTTPException(400, "Video URL is not from our upload host")
@@ -112,13 +111,8 @@ async def create_session(
         if suffix not in _VIDEO_SUFFIXES:
             suffix = ".mp4"
         dest = dest.with_suffix(suffix)
-        try:
-            await cloudinary_service.download_to_path(url, dest)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(502, "Could not fetch the uploaded video") from exc
         stored_name = stored_name or Path(urlparse(url).path).name or dest.name
+        remote_url = url
     else:
         if not file or not file.filename:
             raise HTTPException(400, "Attach a video or a source_url")
@@ -137,6 +131,7 @@ async def create_session(
             "user_id": user["_id"],
             "title": title.strip() or "Ball Track session",
             "path": str(dest),
+            "source_url": remote_url,
             "original_name": stored_name,
             "calibration": cal,
             "status": "queued",
@@ -157,13 +152,6 @@ async def create_session(
             "created_at": now,
             "updated_at": now,
         }
-    )
-    background_tasks.add_task(
-        run_balltrack_job,
-        job_id=job_id,
-        session_id=session_id,
-        video_path=dest,
-        calibration=cal,
     )
     return {"session_id": session_id, "job_id": job_id, "status": "queued"}
 

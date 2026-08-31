@@ -97,3 +97,16 @@ async def top_throws(limit: int = 20) -> list[dict[str, Any]]:
 
 async def get_video(video_id: str) -> dict[str, Any] | None:
     return await get_db().videos.find_one({"_id": video_id})
+
+
+_ACTIVE = ("queued", "claimed", "processing", "analyzing")
+
+
+async def list_active_jobs(user_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    cursor = (
+        get_db()
+        .jobs.find({"user_id": user_id, "status": {"$in": list(_ACTIVE)}})
+        .sort("created_at", -1)
+        .limit(limit)
+    )
+    return await cursor.to_list(length=limit)

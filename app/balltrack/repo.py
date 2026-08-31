@@ -77,3 +77,16 @@ async def update_job(job_id: str, **fields: Any) -> None:
 
 async def get_job(job_id: str) -> dict[str, Any] | None:
     return await _col_jobs().find_one({"_id": job_id})
+
+
+_ACTIVE = ("queued", "claimed", "processing", "analyzing")
+
+
+async def list_active_jobs(user_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    cursor = (
+        _col_jobs()
+        .find({"user_id": user_id, "status": {"$in": list(_ACTIVE)}})
+        .sort("created_at", -1)
+        .limit(limit)
+    )
+    return await cursor.to_list(length=limit)

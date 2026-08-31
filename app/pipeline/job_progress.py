@@ -23,6 +23,7 @@ UpdateFn = Callable[..., Awaitable[None]]
 # Inclusive overall-percent bands. Intra-stage work interpolates inside them.
 ACTION_BANDS: dict[str, tuple[int, int]] = {
     "queued": (0, 0),
+    "claimed": (0, 0),
     "ingest": (1, 8),
     "extract": (8, 12),
     "pose": (12, 48),
@@ -38,6 +39,7 @@ ACTION_BANDS: dict[str, tuple[int, int]] = {
 
 BALLTRACK_BANDS: dict[str, tuple[int, int]] = {
     "queued": (0, 0),
+    "claimed": (0, 0),
     "ingest": (1, 8),
     "calibrate": (8, 14),
     "detect": (14, 42),
