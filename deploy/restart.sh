@@ -6,17 +6,42 @@ set -euo pipefail
 ROOT="/var/www/criclab-web-backend"
 cd "$ROOT"
 
-if ! command -v python3.12 >/dev/null 2>&1; then
-  echo "python3.12 is required (MediaPipe does not support 3.13+)." >&2
-  exit 1
-fi
+pick_python() {
+  local cmd ver
+  if [[ -n "${PYTHON:-}" ]] && command -v "$PYTHON" >/dev/null 2>&1; then
+    cmd="$PYTHON"
+  else
+    cmd=""
+    for cand in python3.12 python3.11 python3.10 python3; do
+      if command -v "$cand" >/dev/null 2>&1; then
+        cmd="$cand"
+        break
+      fi
+    done
+  fi
+  if [[ -z "$cmd" ]]; then
+    echo "No Python 3 interpreter on PATH." >&2
+    exit 1
+  fi
+  ver="$("$cmd" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+  case "$ver" in
+    3.10|3.11|3.12) echo "$cmd" ;;
+    *)
+      echo "Need Python 3.10–3.12 for MediaPipe (found $cmd = $ver)." >&2
+      exit 1
+      ;;
+  esac
+}
+
+PY="$(pick_python)"
+echo "Using $($PY --version 2>&1)"
 
 if [[ ! -f .env ]]; then
   echo "Missing ${ROOT}/.env — create it on the instance. GitHub never deploys this file." >&2
   exit 1
 fi
 
-python3.12 -m venv .venv312
+"$PY" -m venv .venv312
 # shellcheck source=/dev/null
 source .venv312/bin/activate
 python -m pip install -q --upgrade pip
