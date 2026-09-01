@@ -190,10 +190,11 @@ async def get_job(job_id: str, user: CurrentUser):
 
 
 def _original_video_url(video: dict[str, Any] | None) -> str | None:
-    """The raw upload — Cloudinary original first, then a local file if it exists.
+    """Before · your clip: Cloudinary H.264 derivative, else a local file.
 
-    ``videos.path`` is a filename the worker may have written on another
-    machine. Prefer ``source_url`` so Before · your clip does not 404.
+    ``videos.path`` is often a worker machine path and 404s here. Prefer
+    ``source_url`` rewritten with ``f_mp4,vc_h264`` so Chrome can play iPhone
+    HEVC uploads. Never return the raw ``.mov``.
     """
     if not video:
         return None

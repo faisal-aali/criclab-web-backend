@@ -16,6 +16,10 @@ except Exception:  # pragma: no cover
 
 _configured = False
 
+# Same string as the results-page URL rewrite and the signed browser upload
+# `eager` param, so Cloudinary builds one H.264 derivative Chrome can play.
+PLAYBACK_TRANSFORMATION = "f_mp4,vc_h264"
+
 
 def _ensure_configured() -> bool:
     global _configured
@@ -50,7 +54,13 @@ def _ensure_configured() -> bool:
 
 
 def signed_video_upload_params(*, folder: str = "criclab/incoming") -> dict[str, Any] | None:
-    """Browser uploads the clip to Cloudinary so this API never sees the bytes."""
+    """Browser uploads the clip to Cloudinary so this API never sees the bytes.
+
+    ``eager`` matches ``PLAYBACK_TRANSFORMATION`` so an H.264 MP4 exists by the
+    time results load. ``eager_async`` keeps the upload itself from waiting on
+    the transcode. The browser must POST the same ``eager`` / ``eager_async``
+    fields or Cloudinary rejects the signature.
+    """
     if not _ensure_configured():
         return None
     import time
@@ -58,7 +68,12 @@ def signed_video_upload_params(*, folder: str = "criclab/incoming") -> dict[str,
     from cloudinary.utils import api_sign_request
 
     timestamp = int(time.time())
-    params = {"timestamp": timestamp, "folder": folder}
+    params = {
+        "timestamp": timestamp,
+        "folder": folder,
+        "eager": PLAYBACK_TRANSFORMATION,
+        "eager_async": "true",
+    }
     signature = api_sign_request(params, cloudinary.config().api_secret)
     return {
         "cloud_name": cloudinary.config().cloud_name,
@@ -67,6 +82,8 @@ def signed_video_upload_params(*, folder: str = "criclab/incoming") -> dict[str,
         "signature": signature,
         "folder": folder,
         "resource_type": "video",
+        "eager": PLAYBACK_TRANSFORMATION,
+        "eager_async": "true",
     }
 
 
@@ -93,7 +110,7 @@ def browser_playback_url(url: str) -> str:
     first = rest.split("/", 1)[0]
     if first and ("f_mp4" in first or "vc_h264" in first):
         return url
-    path = parsed.path[: idx + len(marker)] + f"f_mp4,vc_h264/{rest}"
+    path = parsed.path[: idx + len(marker)] + f"{PLAYBACK_TRANSFORMATION}/{rest}"
     if path.lower().endswith(".mov"):
         path = path[:-4] + ".mp4"
     return parsed._replace(path=path).geturl()
