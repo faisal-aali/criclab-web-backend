@@ -9,11 +9,23 @@
 Never ask `gemma3:4b` to estimate speed/angles from raw video frames (that *increases* false km/h). There is no custom cricket LLM. Gemma runs *after* CV and only narrates `status === ok` JSON, then picks **catalog drill IDs**. Pipeline order (Action mode):
 
 ```text
-Upload → Extract meta → POSE (MediaPipe) → Action/release detection → Calibrate
-  → Best-effort ball track → Metrics JSON → Slow-mo overlay video (render)
-  → Upload processed video to Cloudinary → Agent (gemma3:4b) narrative
-  → SpinLab-style PDF (+ catalog drill URLs, no iframes) → Persist MongoDB → React results + Train
+Upload (this API) → queued Mongo job
+  → criclab-video-service worker: POSE → action → calibrate → track → metrics
+    → overlay → Cloudinary → Gemma narrative + drill matching → PDF
+      → persist delivery → React polls this API
 ```
+
+## Three processes (do not treat `app` as one package)
+
+| Process | Repo | Owns |
+|---------|------|------|
+| Website API | **this repo** | Auth, upload, insert `queued` jobs, job/delivery **reads**, stump *still* calibration, signed Cloudinary upload, chat assistant, Train catalog HTTP, bookings |
+| Video worker | `criclab-video-service` | Everything after claim: MediaPipe/OpenCV, metrics, overlay, PDF, Gemma *video* notes, drill matching, overlay/PDF upload, delivery **writes** |
+| UI | `criclab-web-frontend` | Display API JSON only |
+
+`app.coaching` in **this** repo is catalog I/O (`load_catalog` / `save_catalog` for Train and `/admin/drills`). `app.coaching` in the video service is matching (`weakness_tags`, `balltrack_tags`, hydrate). They are not the same package. Admin edits to `drills.json` here do not auto-sync to the worker snapshot.
+
+Same relative filenames (`agent/ollama_agent.py`, `balltrack/stumps.py`) are allowed when the role differs. Do not import video-service modules from this API, or vice versa.
 
 ## Two film modes (do not merge their numbers)
 
@@ -296,34 +308,27 @@ UI lives in `../criclab-web-frontend`. Backend must keep this contract stable:
 - CORS via `CORS_ORIGINS` must include the Vite origin (and any deployed frontend)
 - React never talks to MongoDB or Ollama — only this FastAPI
 
-## Backend (FastAPI)
+## Backend (FastAPI) — this repo
 
-- Thin route handlers: validate → enqueue/run pipeline → return job/analysis IDs
-- Heavy work in `pipeline/` modules (extract, detect, track, calibrate, metrics)
-- Agent lives in `agent/` and only receives structured tool outputs
-- PDF generation is a separate module consuming metrics + analysis + optional frame stills
+- Thin route handlers: validate → insert `queued` job → return job IDs
+- React never talks to Mongo, Ollama, or the video worker — only this FastAPI
+- `pipeline/` here is ETA + player-profile parse only
+- Chat assistant lives in `agent/` + `assistant/`; video coaching notes live in the worker
+- Catalog HTTP: `coaching/drills.json` + `recommend.py` load/save only
 
 ## Pipeline modularity
 
-Each stage is swappable:
+CV stages run in **criclab-video-service**, not this process. When adding a bowling metric, extend the worker metrics stage + UI cards + PDF tiles — do not put pose/PDF back in this API.
 
-| Stage | Module | Input | Output |
-|-------|--------|-------|--------|
-| Extract | `pipeline/extract.py` | video path | frames / fps / metadata |
-| Pose | `pipeline/pose.py` | frames | 33 landmarks/frame (pixels + visibility) |
-| Action | `pipeline/action.py` | pose track | throwing side, release frame, phases, wrist-speed series |
-| Calibrate | `pipeline/calibrate.py` | body px height + ref | px → world scale |
-| Ball (opt.) | `pipeline/detect.py`+`track.py` | frames | best-effort trajectory (≥6 pts) |
-| Metrics | `pipeline/metrics.py` | pose + action + scale | metrics doc + confidence + scores |
-| Render | `pipeline/render.py` | video + pose + metrics | slow-mo overlay MP4 (avc1) + release still |
-| Upload | `services/cloudinary_service.py` | mp4 + pdf | Cloudinary secure/playback URLs |
-| Agent | `agent/ollama_agent.py` | metrics + catalog drills | narrative + `recommendations` (catalog IDs only) |
-| Coaching | `coaching/drills.json` + `recommend.py` | scores / line-length | weakness tags; never invent URLs |
-| PDF | `pdf/report.py` + `pdf/charts.py` | metrics + analysis + charts | SpinLab-style PDF (event stills + drill text links) |
-| Ball flight | `balltrack/` | behind-bowler + stump boxes | pitch-plane speed, line, length, overlay, pitch map |
-
-Add new bowling metrics by extending the metrics stage + UI cards + PDF tiles —
-do not rewrite upload/API shells.
+| Stage | Where | Module |
+|-------|--------|--------|
+| Queue insert / job reads | this API | `api/videos.py`, `api/balltrack.py` |
+| ETA for the UI | this API | `pipeline/eta.py` |
+| Stump still boxes | this API | `balltrack/stumps.py` |
+| Extract → pose → metrics → overlay → PDF | video service | `pipeline/*`, `pdf/*` |
+| Ball flight video | video service | `balltrack/runner.py` |
+| Gemma video notes + matching | video service | `agent/ollama_agent.py`, `coaching/recommend.py` |
+| Train / admin catalog | this API | `api/coaching.py`, `api/admin.py` |
 
 ## Overlay video (SpinLab-parity, CricLab brand)
 

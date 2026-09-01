@@ -1,8 +1,8 @@
-# Memory Bank — Cric-Lab (Backend)
+# Memory Bank — Cric-Lab (Website API)
 
-Structured source of truth the AI reads first for the **Cric-Lab FastAPI backend** (CV pipeline, agent, PDF, MongoDB).
+Structured source of truth the AI reads first for the **Cric-Lab website FastAPI** (accounts, upload, job queue, catalog HTTP, chat, MongoDB reads).
 
-Sibling frontend repo: `../criclab-web-frontend` (Vite + React UI + its own trimmed memory-bank).
+Sibling UI: `../criclab-web-frontend`. Sibling workers: `../criclab-video-service` (pose, overlay, PDF, drill matching).
 
 ## Layout
 
@@ -21,8 +21,8 @@ memory-bank/
 | File | Role |
 |------|------|
 | `productBrief.md` | Cricket bowling lab: upload → analyze → metrics → PDF |
-| `techContext.md` | FastAPI Python BE, MongoDB, Ollama Gemma/nomic, MediaPipe |
-| `systemPatterns.md` | CV metrics first, then agent; modular pipeline; PDF reports |
+| `techContext.md` | FastAPI website API, MongoDB, chat assistant; CV is the sibling worker |
+| `systemPatterns.md` | Queue vs worker ownership; two film modes; catalog HTTP vs matching |
 | `roadmap.md` | MVP bowling workflow + phased expansion |
 
 ## Why this exists

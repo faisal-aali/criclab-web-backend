@@ -1,27 +1,27 @@
-# Tech Context — Cric-Lab (Backend)
+# Tech Context — Cric-Lab (Website API)
 
-Sibling frontend: `../criclab-web-frontend` (Vite + React). This repo is the FastAPI API + CV pipeline only.
+Sibling frontend: `../criclab-web-frontend` (Vite + React).
+Sibling workers: `../criclab-video-service` (MediaPipe, overlay, PDF, Gemma video notes).
+
+This repo is the **browser-facing FastAPI**: accounts, upload, job queue insert, results reads, Train catalog HTTP, chat assistant, bookings. It does **not** run the video pipeline.
 
 ## Stack
 
 | Layer | Technology | Purpose |
 |-------|------------|---------|
-| Backend | **Python FastAPI** | Orchestration, upload APIs, job status, PDF generation endpoints |
-| Pose engine | **MediaPipe BlazePose** (`opencv-contrib` + `mediapipe`) | 33 body landmarks/frame — the measurement engine |
-| Video / CV | OpenCV (bundled ffmpeg) | Frame extraction, overlay render, MP4 (avc1/H.264) encode |
-| Ball tracking | OpenCV MOG2 + RANSAC (best-effort) | Headline Action ball speed **only** with a validated in-air lock; otherwise `—` |
-| Motion engine | Custom Python metrics module | Arm speed, joint angles, timing, rotation proxies, scores |
-| Charts | **matplotlib** (Agg) | Joint-angle / hand-speed charts embedded in the PDF |
-| Database | **MongoDB** | Sessions, videos, deliveries, pose/metrics, analyses, agent runs |
-| Local LLM | **Ollama + `gemma3:4b`** | Coaching insights, PDF narrative, comparisons |
-| Embeddings | **Ollama + `nomic-embed-text`** | Planned (FEAT-015) semantic search over coaching notes — not wired yet |
-| PDF | ReportLab (platypus + graphics) | SpinLab-style bowling report |
-| Object storage | **Cloudinary** (creds in `.env`) + local disk fallback | Processed overlay video + PDF hosting; returns shareable URL |
+| API | **Python FastAPI** | Auth, upload, queue insert, job/delivery reads, admin |
+| Database | **MongoDB** | Users, jobs, videos, deliveries (shared with workers) |
+| OpenCV (stills) | `opencv-contrib-python-headless` | Ball-flight **stump photo** boxes only |
+| Local LLM | **Ollama + `gemma3:4b`** | Website **chat assistant** (not video coaching notes) |
+| Embeddings | **Ollama + `nomic-embed-text`** | Assistant RAG |
+| Object storage | **Cloudinary** | Signed browser upload; overlay/PDF upload is the worker |
+| Email | SMTP | OTP, recovery, notifications |
 
-## Python environment (IMPORTANT)
+Video OpenCV, MediaPipe, matplotlib PDF, and drill matching live in `criclab-video-service`.
 
-MediaPipe requires **Python 3.10–3.12** and pins `numpy<2`. Run the backend with
-the dedicated 3.12 virtualenv, NOT a 3.13/3.14 one:
+## Python environment
+
+Use the dedicated 3.12 virtualenv (stump stills use OpenCV; MediaPipe is **not** a dependency here):
 
 ```bash
 cd criclab-web-backend
@@ -29,32 +29,28 @@ source .venv312/bin/activate      # Windows: .\.venv312\Scripts\Activate.ps1
 uvicorn app.main:app --reload --port 8000
 ```
 
-Note: MediaPipe crashes under a restricted syscall sandbox but runs fine in a
-normal shell.
+Workers must also be running (`cd ../criclab-video-service && python -m app.worker`) or jobs stay `queued`.
 
 ## Why this backend
 
-Python is the practical choice for OpenCV, pose estimation, tracking, and physics metrics. FastAPI exposes REST status to the Vite React app. The LLM never measures frames; it consumes structured JSON metrics.
+FastAPI is the only process the React app talks to. Heavy CV stays in a worker so closing a tab cannot stop a job, and the website process stays free for auth and polling.
 
 ## Local AI models
 
 | Model | Role |
 |-------|------|
-| `gemma3:4b` | Reasoning, summaries, coaching copy for UI + PDF |
-| `nomic-embed-text:latest` | Embeddings for historical coaching memory search |
+| `gemma3:4b` | Chat assistant in this repo; video coaching notes in the worker |
+| `nomic-embed-text:latest` | Embeddings for assistant retrieval |
 
 ## High-level data flow
 
 ```text
 Vite React (upload)  [criclab-web-frontend]
-  → FastAPI /videos + /analyses
-    → FFmpeg / OpenCV pipeline
-      → Detection + tracking + pose
-        → Motion / physics engine → structured metrics
-          → Ollama (gemma3:4b) agent tools
-            → MongoDB persist
-              → Results API + PDF generator
-                → React results page
+  → FastAPI /videos or /balltrack  [this repo]
+    → Mongo job status=queued
+      → criclab-video-service worker claims
+        → CV → overlay → Gemma notes + matching → PDF → delivery write
+          → React polls this API /jobs + /deliveries
 ```
 
 ## Repo layout (this backend)
@@ -62,24 +58,23 @@ Vite React (upload)  [criclab-web-frontend]
 ```text
 criclab-web-backend/
 ├── app/
-│   ├── api/              # routes (videos, balltrack, coaching, health)
-│   ├── pipeline/         # extract · pose · action · calibrate · metrics · render
-│   ├── balltrack/        # stump homography speed / line / length
-│   ├── coaching/         # drills.json + recommend.py
-│   ├── agent/            # Ollama tools + report narrative
-│   ├── pdf/              # report builder + charts (matplotlib)
-│   ├── services/         # cloudinary_service
-│   ├── db/               # Mongo models / repositories
+│   ├── api/              # routes (auth, videos, balltrack, coaching, admin, …)
+│   ├── pipeline/         # ETA + player-profile parse (not pose/render)
+│   ├── balltrack/        # stump still detect + session/job Mongo helpers
+│   ├── coaching/         # drills.json catalog I/O for Train / admin
+│   ├── agent/            # chat assistant LLM (not video coaching)
+│   ├── assistant/        # RAG knowledge + chat
+│   ├── services/         # cloudinary signed upload, email, bookings, …
+│   ├── db/               # Mongo
 │   ├── config.py
 │   └── main.py
-├── storage/              # demo videos (gitignored); runtime uses ~/.local/share/criclab
 ├── memory-bank/          # this folder
 ├── requirements.txt
 ├── .env.example
 └── run.sh
 ```
 
-Frontend lives in the sibling repo `criclab-web-frontend/`.
+Frontend: `criclab-web-frontend/`. Video CV: `criclab-video-service/`.
 
 ## MongoDB collections (target)
 
@@ -126,12 +121,16 @@ pip install -r requirements.txt
 cp .env.example .env
 uvicorn app.main:app --reload --port 8000
 
+# separate terminal — jobs stay queued without this
+cd ../criclab-video-service && python -m app.worker
+
 ollama list   # expect gemma3:4b, nomic-embed-text
 ```
 
 ## Constraints
 
-- Do not put frame measurement logic in Gemma
-- Prefer modular pipeline packages over one giant script
+- Do not put frame measurement logic in Gemma (and do not run the video pipeline in this process)
+- Catalog HTTP stays here; drill matching after CV stays in `criclab-video-service`
 - MongoDB is the system of record for analyses and history
 - Frontend is a separate repo (`criclab-web-frontend`); do not reintroduce a monorepo layout here
+- Mongo, Cloudinary, and `STORAGE_DIR` must match the video service

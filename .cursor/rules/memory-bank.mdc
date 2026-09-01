@@ -1,5 +1,5 @@
 ---
-description: Read the backend Memory Bank before coding in this repo
+description: Read the website API Memory Bank before coding in this repo
 alwaysApply: true
 ---
 
@@ -7,4 +7,4 @@ alwaysApply: true
 
 Before non-trivial work, read `memory-bank/`: `productBrief.md`, `techContext.md`, `systemPatterns.md` (highest priority), `roadmap.md`, relevant `tasks/`, `agent-rules/agent.md`.
 
-Sibling UI: `../criclab-web-frontend` (its own Memory Bank). Do not add Vite/React sources here. Keep the API contract stable for that frontend.
+Sibling UI: `../criclab-web-frontend`. Sibling workers: `../criclab-video-service`. Do not add Vite/React sources or MediaPipe/PDF pipeline here. Keep the API contract stable for the frontend.
