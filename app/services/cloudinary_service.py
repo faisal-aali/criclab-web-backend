@@ -73,3 +73,27 @@ def signed_video_upload_params(*, folder: str = "criclab/incoming") -> dict[str,
 def is_cloudinary_url(url: str) -> bool:
     host = (urlparse(url).hostname or "").lower()
     return host == "res.cloudinary.com" or host.endswith(".cloudinary.com")
+
+
+def browser_playback_url(url: str) -> str:
+    """H.264 MP4 derivative of an incoming Cloudinary clip for ``<video>``.
+
+    Browser uploads keep the phone container (often ``.mov``). The overlay is
+    re-encoded; this original URL is not. Insert ``f_mp4,vc_h264`` so the
+    results page can play the same file the worker analysed.
+    """
+    if not is_cloudinary_url(url):
+        return url
+    parsed = urlparse(url)
+    marker = "/video/upload/"
+    idx = parsed.path.find(marker)
+    if idx < 0:
+        return url
+    rest = parsed.path[idx + len(marker) :]
+    first = rest.split("/", 1)[0]
+    if first and ("f_mp4" in first or "vc_h264" in first):
+        return url
+    path = parsed.path[: idx + len(marker)] + f"f_mp4,vc_h264/{rest}"
+    if path.lower().endswith(".mov"):
+        path = path[:-4] + ".mp4"
+    return parsed._replace(path=path).geturl()

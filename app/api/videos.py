@@ -189,6 +189,26 @@ async def get_job(job_id: str, user: CurrentUser):
     return job
 
 
+def _original_video_url(video: dict[str, Any] | None) -> str | None:
+    """The raw upload — Cloudinary original first, then a local file if it exists.
+
+    ``videos.path`` is a filename the worker may have written on another
+    machine. Prefer ``source_url`` so Before · your clip does not 404.
+    """
+    if not video:
+        return None
+    src = (video.get("source_url") or "").strip()
+    if src and cloudinary_service.is_cloudinary_url(src):
+        return cloudinary_service.browser_playback_url(src)
+    name = Path(video["path"]).name if video.get("path") else None
+    if not name:
+        return None
+    local = get_settings().storage_path / "videos" / name
+    if not local.is_file():
+        return None
+    return f"/media/videos/{name}"
+
+
 def _ok_metric_value(metrics: dict[str, Any] | None, key: str) -> float | None:
     node = (metrics or {}).get(key) or {}
     if not isinstance(node, dict) or node.get("status") != "ok":
@@ -258,7 +278,6 @@ async def get_delivery(delivery_id: str, user: CurrentUser):
     if not visible_to(user, (d or {}).get("user_id"), exists=bool(d)):
         raise HTTPException(404, "Delivery not found")
     video = await repo.get_video(d["video_id"]) if d.get("video_id") else None
-    video_name = Path(video["path"]).name if video and video.get("path") else None
     return {
         "id": d["_id"],
         "job_id": d.get("job_id"),
@@ -276,7 +295,7 @@ async def get_delivery(delivery_id: str, user: CurrentUser):
             "release_still_url": f"/artifacts/{d.get('job_id')}/release.jpg",
             "overlay_video_url": f"/artifacts/{d.get('job_id')}/overlay.mp4",
             "pdf_url": f"/artifacts/{d.get('job_id')}/bowling_report.pdf",
-            "original_video_url": f"/media/videos/{video_name}" if video_name else None,
+            "original_video_url": _original_video_url(video),
             "cloudinary_video_url": (d.get("artifacts") or {}).get("cloudinary_video_url"),
             "cloudinary_pdf_url": (d.get("artifacts") or {}).get("cloudinary_pdf_url"),
         },
