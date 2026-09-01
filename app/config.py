@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     bedrock_embedding_model_id: str = "amazon.titan-embed-text-v2:0"
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
+    worker_ec2_instance_id: str = "i-0c2341cb9422fdaa0"
+    worker_ec2_region: str = "ap-south-1"
     # Leave empty to use ~/.local/share/criclab (outside the repo).
     storage_dir: str = ""
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
