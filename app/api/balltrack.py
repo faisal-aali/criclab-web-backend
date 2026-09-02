@@ -11,6 +11,7 @@ from app.api.deps import CurrentUser, VerifiedUser, visible_to
 from app.balltrack import repo
 from app.balltrack.stumps import detect_stump_sets
 from app.config import get_settings
+from app.pipeline import quota
 from app.pipeline.eta import estimate_eta_seconds
 from app.services import cloudinary_service
 
@@ -153,6 +154,7 @@ async def create_session(
             "updated_at": now,
         }
     )
+    await quota.schedule_queued_jobs(notify_inserted_id=job_id)
     return {"session_id": session_id, "job_id": job_id, "status": "queued"}
 
 
@@ -181,6 +183,22 @@ async def get_job(job_id: str, user: CurrentUser):
         collection="balltrack_jobs", pipeline="ballflight", job=job
     )
     return job
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str, user: CurrentUser):
+    job = await repo.get_job(job_id)
+    if not visible_to(user, (job or {}).get("user_id"), exists=bool(job)):
+        raise HTTPException(404, "Job not found")
+    if job.get("status") != "queued":
+        raise HTTPException(409, "This clip has already started")
+    updated = await quota.cancel_queued_job(job_id=job_id, collection="balltrack_jobs")
+    if not updated:
+        raise HTTPException(409, "This clip has already started")
+    session_id = updated.get("session_id")
+    if session_id:
+        await repo.update_session(str(session_id), status="cancelled")
+    return {"id": updated["_id"], "status": updated.get("status")}
 
 
 @router.get("/deliveries/{delivery_id}")

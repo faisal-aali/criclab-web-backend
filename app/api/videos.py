@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from app.api.deps import CurrentUser, VerifiedUser, visible_to
 from app.config import get_settings
 from app.db import repository as repo
+from app.pipeline import quota
 from app.pipeline.eta import estimate_eta_seconds
 from app.pipeline.profile import parse_player_profile
 from app.services import cloudinary_service
@@ -144,6 +145,7 @@ async def upload_video(
     }
     await repo.insert_job(job_doc)
     # criclab-video-service workers claim queued jobs. This API does not run CV.
+    await quota.schedule_queued_jobs(notify_inserted_id=job_id)
 
     return {"video_id": video_id, "job_id": job_id, "status": "queued"}
 
@@ -174,6 +176,19 @@ async def list_active_jobs(user: CurrentUser):
         items.append(_public_job(job, kind="ballflight", eta=eta))
     items.sort(key=lambda j: str(j.get("created_at") or ""), reverse=True)
     return {"items": items}
+
+
+@router.post("/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str, user: CurrentUser):
+    job = await repo.get_job(job_id)
+    if not visible_to(user, (job or {}).get("user_id"), exists=bool(job)):
+        raise HTTPException(404, "Job not found")
+    if job.get("status") != "queued":
+        raise HTTPException(409, "This clip has already started")
+    updated = await quota.cancel_queued_job(job_id=job_id, collection="jobs")
+    if not updated:
+        raise HTTPException(409, "This clip has already started")
+    return {"id": updated["_id"], "status": updated.get("status")}
 
 
 @router.get("/jobs/{job_id}")

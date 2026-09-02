@@ -30,6 +30,7 @@ High-level features. Detail lives in `tasks/`.
 | FEAT-023 | Support ticketing | Planned | Collections + indexes ready; no service or UI yet |
 | FEAT-024 | Coaching bookings | Planned | Collections + indexes ready; no service or UI yet |
 | FEAT-025 | RAG assistant | Planned | `kb_chunks` indexed; no retrieval or UI yet |
+| FEAT-031 | **Daily video quota** | Done | 60 starts/UTC day; FIFO overflow; `expected_start_at`; analysis notify |
 
 ## Change log
 
@@ -156,3 +157,11 @@ High-level features. Detail lives in `tasks/`.
   **Not done:** the follow-up request for 120→30 fps slow-motion playback,
   auto-generated breakpoints with frame/timestamp/confidence, and player speed
   controls — see TASK-013 for what that needs.
+- **2 Sep 2026 (TASK-014 / FEAT-031):** Daily video quota. The website API
+  schedules queued Action and Ball-flight jobs onto UTC days (default 60
+  starts/day), writes `expected_start_at`, and notifies when that date moves.
+  The video worker is the only process that increments `quota_days.started`.
+- **2 Sep 2026 (FEAT-031 worker cost):** This always-on API starts the separate
+  worker EC2 only when a queued clip can begin now. A lifespan loop (not cron)
+  recomputes at boot and at 00:00 UTC so leftover FIFO jobs start after the cap
+  resets. Wake retries while the instance is still stopping.

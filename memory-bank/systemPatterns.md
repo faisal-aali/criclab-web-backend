@@ -312,9 +312,11 @@ UI lives in `../criclab-web-frontend`. Backend must keep this contract stable:
 
 - Thin route handlers: validate → insert `queued` job → return job IDs
 - React never talks to Mongo, Ollama, or the video worker — only this FastAPI
-- `pipeline/` here is ETA + player-profile parse only
+- `pipeline/` here is ETA, daily quota schedule (`quota.py`), and player-profile parse
 - Chat assistant lives in `agent/` + `assistant/`; video coaching notes live in the worker
 - Catalog HTTP: `coaching/drills.json` + `recommend.py` load/save only
+- **Daily quota:** this API assigns `available_at` / `expected_start_at` and notifies. It never increments `quota_days.started` — only the video worker does that. Cancel is queued-only. `kind=analysis` notifications fire on insert (email if deferred to a later UTC day) and when `scheduled_date` changes.
+- **Worker EC2 wake:** this always-on API starts the **separate** worker instance (`WORKER_EC2_INSTANCE_ID`) only when a clip can begin now (`has_claimable_job`: eligible queued + a slot left today). Upload does not poke on insert; `schedule_queued_jobs` may. A lifespan task recomputes at boot and at **00:00 UTC** (not cron/EventBridge). If the instance is still `stopping`, wake retries for ~2 minutes. Locally the poke is a no-op.
 
 ## Pipeline modularity
 
@@ -324,6 +326,8 @@ CV stages run in **criclab-video-service**, not this process. When adding a bowl
 |-------|--------|--------|
 | Queue insert / job reads | this API | `api/videos.py`, `api/balltrack.py` |
 | ETA for the UI | this API | `pipeline/eta.py` |
+| Daily quota schedule / notify | this API | `pipeline/quota.py` |
+| Worker EC2 start-if-stopped | this API | `services/ec2_worker.py` (claimable + UTC midnight) |
 | Stump still boxes | this API | `balltrack/stumps.py` |
 | Extract → pose → metrics → overlay → PDF | video service | `pipeline/*`, `pdf/*` |
 | Ball flight video | video service | `balltrack/runner.py` |

@@ -93,11 +93,13 @@ INDEXES: dict[str, list[IndexModel]] = {
     "jobs": [
         IndexModel([("user_id", ASCENDING), ("created_at", DESCENDING)], name="user_recent"),
         IndexModel([("status", ASCENDING), ("created_at", DESCENDING)], name="status_recent"),
+        IndexModel([("status", ASCENDING), ("created_at", ASCENDING)], name="status_fifo"),
     ],
     # Ball-flight pipeline — same shape as `jobs`/`deliveries`, own collections.
     "balltrack_jobs": [
         IndexModel([("user_id", ASCENDING), ("created_at", DESCENDING)], name="user_recent"),
         IndexModel([("status", ASCENDING), ("created_at", DESCENDING)], name="status_recent"),
+        IndexModel([("status", ASCENDING), ("created_at", ASCENDING)], name="status_fifo"),
     ],
     "balltrack_sessions": [
         IndexModel([("user_id", ASCENDING), ("created_at", DESCENDING)], name="user_recent"),

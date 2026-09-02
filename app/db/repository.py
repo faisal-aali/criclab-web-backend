@@ -3,7 +3,6 @@ from typing import Any
 from uuid import uuid4
 
 from app.db.mongo import get_db
-from app.services.ec2_worker import schedule_wake_worker
 
 
 def new_id(prefix: str) -> str:
@@ -23,7 +22,6 @@ async def insert_video(doc: dict[str, Any]) -> str:
 async def insert_job(doc: dict[str, Any]) -> str:
     db = get_db()
     await db.jobs.insert_one(doc)
-    schedule_wake_worker()
     return doc["_id"]
 
 

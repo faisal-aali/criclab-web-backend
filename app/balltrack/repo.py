@@ -5,7 +5,6 @@ from typing import Any
 from uuid import uuid4
 
 from app.db.mongo import get_db
-from app.services.ec2_worker import schedule_wake_worker
 
 
 def new_id(prefix: str) -> str:
@@ -64,7 +63,6 @@ async def list_deliveries_for_session(session_id: str) -> list[dict[str, Any]]:
 
 async def insert_job(doc: dict[str, Any]) -> str:
     await _col_jobs().insert_one(doc)
-    schedule_wake_worker()
     return doc["_id"]
 
 

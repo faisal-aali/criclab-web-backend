@@ -31,7 +31,7 @@ For non-trivial work:
 
 ## Implementation rules
 
-- This repo: FastAPI queue insert + reads; catalog HTTP; chat assistant
+- This repo: FastAPI queue insert + reads; catalog HTTP; chat assistant; daily quota schedule/notify; claimable worker EC2 wake + UTC midnight catch-up
 - Video CV / overlay / PDF / Gemma video notes / drill matching: `criclab-video-service`
 - LLM here: Ollama `gemma3:4b` for the **chat assistant**; `nomic-embed-text` for RAG
 - Persist analyses in MongoDB (workers write deliveries; this API reads them)

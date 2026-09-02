@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,6 +23,7 @@ from app.coaching.coaches_seed import seed_coaches
 from app.config import get_settings
 from app.db.indexes import ensure_indexes
 from app.db.mongo import close_mongo, ping_mongo
+from app.pipeline import quota
 
 
 @asynccontextmanager
@@ -79,7 +81,15 @@ async def lifespan(_: FastAPI):
         logging.getLogger("criclab").warning(
             "JWT_SECRET is not set — authentication endpoints will refuse to issue tokens."
         )
+    dirty_task = asyncio.create_task(quota.recompute_loop(), name="quota-recompute")
+    midnight_task = asyncio.create_task(quota.midnight_wake_loop(), name="quota-midnight-wake")
     yield
+    for task in (dirty_task, midnight_task):
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     await close_mongo()
 
 

@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # Where links in emails point — the frontend, not this API.
     app_base_url: str = "http://localhost:5173"
 
+    # Global cap on video jobs started per UTC day (Action + Ball-flight share it).
+    daily_video_quota: int = 60
+
     # Cloudinary (signed browser upload — overlay/PDF upload is the video service)
     cloudinary_url: str | None = None
     cloudinary_cloud_name: str | None = None
@@ -95,6 +98,19 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return v.strip()
         return v
+
+    @field_validator("daily_video_quota", mode="before")
+    @classmethod
+    def _daily_quota(cls, v: Any) -> int:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return 60
+        try:
+            n = int(v)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DAILY_VIDEO_QUOTA must be a positive integer") from exc
+        if n < 1:
+            raise ValueError("DAILY_VIDEO_QUOTA must be at least 1")
+        return n
 
     @field_validator("app_env", mode="before")
     @classmethod

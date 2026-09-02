@@ -59,7 +59,7 @@ Vite React (upload)  [criclab-web-frontend]
 criclab-web-backend/
 ├── app/
 │   ├── api/              # routes (auth, videos, balltrack, coaching, admin, …)
-│   ├── pipeline/         # ETA + player-profile parse (not pose/render)
+│   ├── pipeline/         # ETA + daily quota schedule + player-profile parse (not pose/render)
 │   ├── balltrack/        # stump still detect + session/job Mongo helpers
 │   ├── coaching/         # drills.json catalog I/O for Train / admin
 │   ├── agent/            # chat assistant LLM (not video coaching)
@@ -90,7 +90,9 @@ Frontend: `criclab-web-frontend/`. Video CV: `criclab-video-service/`.
 | `metrics` | Calculated bowling metrics + confidence |
 | `analyses` | AI findings + PDF paths |
 | `agent_runs` / `agent_steps` | Tool calls and reasoning traces |
-| `coaching_notes` | Historical notes (embedded with nomic) |
+| `jobs` / `balltrack_jobs` | Analysis queue (this API inserts; workers claim) |
+| `quota_days` | Per-UTC-day start counter (`started`); worker increments |
+| `quota_state` | Dirty flag so this API can recompute expected times after worker events |
 
 ## Bowling metrics (current)
 
@@ -134,3 +136,4 @@ ollama list   # expect gemma3:4b, nomic-embed-text
 - MongoDB is the system of record for analyses and history
 - Frontend is a separate repo (`criclab-web-frontend`); do not reintroduce a monorepo layout here
 - Mongo, Cloudinary, and `STORAGE_DIR` must match the video service
+- Production: this API + frontend share an **always-on** EC2; the video worker is a **separate** instance that idle-stops. This process pokes that worker when a job is claimable and at 00:00 UTC.
