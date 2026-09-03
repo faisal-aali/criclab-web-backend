@@ -163,6 +163,7 @@ async def list_active_jobs(user: CurrentUser):
     """In-flight Action + Ball flight jobs for the header progress icon."""
     from app.balltrack import repo as bt_repo
 
+    await quota.fail_stale_in_flight_jobs()
     action = await repo.list_active_jobs(user["_id"])
     flight = await bt_repo.list_active_jobs(user["_id"])
     items = []
@@ -183,11 +184,11 @@ async def cancel_job(job_id: str, user: CurrentUser):
     job = await repo.get_job(job_id)
     if not visible_to(user, (job or {}).get("user_id"), exists=bool(job)):
         raise HTTPException(404, "Job not found")
-    if job.get("status") != "queued":
-        raise HTTPException(409, "This clip has already started")
+    if job.get("status") not in ("queued", "claimed", "processing", "analyzing"):
+        raise HTTPException(409, "This clip has already finished")
     updated = await quota.cancel_queued_job(job_id=job_id, collection="jobs")
     if not updated:
-        raise HTTPException(409, "This clip has already started")
+        raise HTTPException(409, "This clip has already finished")
     return {"id": updated["_id"], "status": updated.get("status")}
 
 
@@ -199,6 +200,7 @@ async def get_job(job_id: str, user: CurrentUser):
     # may open any job so the admin panel can show the same results page.
     if not visible_to(user, (job or {}).get("user_id"), exists=bool(job)):
         raise HTTPException(404, "Job not found")
+    job = await quota.fail_stale_job(job, collection="jobs")
     job["id"] = job.pop("_id")
     job["eta_seconds"] = await estimate_eta_seconds(collection="jobs", pipeline="action", job=job)
     return job

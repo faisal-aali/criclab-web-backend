@@ -178,6 +178,7 @@ async def get_job(job_id: str, user: CurrentUser):
     job = await repo.get_job(job_id)
     if not visible_to(user, (job or {}).get("user_id"), exists=bool(job)):
         raise HTTPException(404, "Job not found")
+    job = await quota.fail_stale_job(job, collection="balltrack_jobs")
     job["id"] = job.pop("_id")
     job["eta_seconds"] = await estimate_eta_seconds(
         collection="balltrack_jobs", pipeline="ballflight", job=job
@@ -190,11 +191,11 @@ async def cancel_job(job_id: str, user: CurrentUser):
     job = await repo.get_job(job_id)
     if not visible_to(user, (job or {}).get("user_id"), exists=bool(job)):
         raise HTTPException(404, "Job not found")
-    if job.get("status") != "queued":
-        raise HTTPException(409, "This clip has already started")
+    if job.get("status") not in ("queued", "claimed", "processing", "analyzing"):
+        raise HTTPException(409, "This clip has already finished")
     updated = await quota.cancel_queued_job(job_id=job_id, collection="balltrack_jobs")
     if not updated:
-        raise HTTPException(409, "This clip has already started")
+        raise HTTPException(409, "This clip has already finished")
     session_id = updated.get("session_id")
     if session_id:
         await repo.update_session(str(session_id), status="cancelled")

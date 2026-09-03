@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
-from pymongo import UpdateOne
+from pymongo import ReturnDocument, UpdateOne
 
 from app.config import get_settings
 from app.db.mongo import get_db
@@ -403,13 +403,74 @@ async def midnight_wake_loop(*, slice_seconds: float = 30.0) -> None:
         await asyncio.sleep(min(chunk, remaining))
 
 
+_STALE_IN_FLIGHT = timedelta(minutes=45)
+_ACTIVE_CANCEL = (_QUEUED, *_IN_FLIGHT)
+
+
+async def fail_stale_in_flight_jobs() -> int:
+    """Mark claimed/processing jobs with no progress for 45+ minutes as failed.
+
+    A dead worker leaves rows in `processing` forever. The header polls this
+    collection, so ghosts stay on screen until they are closed out.
+    """
+    cutoff = datetime.now(timezone.utc) - _STALE_IN_FLIGHT
+    now = datetime.now(timezone.utc)
+    fields = {
+        "status": "failed",
+        "stage": "failed",
+        "message": "Analysis stopped before this clip finished. Upload it again.",
+        "updated_at": now,
+    }
+    filt = {
+        "status": {"$in": list(_IN_FLIGHT)},
+        "$or": [
+            {"updated_at": {"$lt": cutoff}},
+            {"updated_at": {"$exists": False}, "created_at": {"$lt": cutoff}},
+        ],
+    }
+    n = 0
+    db = get_db()
+    for name in ("jobs", "balltrack_jobs"):
+        n += (await db[name].update_many(filt, {"$set": fields})).modified_count
+    return n
+
+
+def _aware(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+async def fail_stale_job(job: dict[str, Any] | None, *, collection: str) -> dict[str, Any] | None:
+    """Close one abandoned in-flight job so GET /jobs/:id stops looking live."""
+    if not job or job.get("status") not in _IN_FLIGHT:
+        return job
+    stamp = _aware(job.get("updated_at")) or _aware(job.get("created_at"))
+    if stamp is None or datetime.now(timezone.utc) - stamp < _STALE_IN_FLIGHT:
+        return job
+    now = datetime.now(timezone.utc)
+    col = get_db()[collection]
+    await col.update_one(
+        {"_id": job["_id"], "status": {"$in": list(_IN_FLIGHT)}},
+        {
+            "$set": {
+                "status": "failed",
+                "stage": "failed",
+                "message": "Analysis stopped before this clip finished. Upload it again.",
+                "updated_at": now,
+            }
+        },
+    )
+    return await col.find_one({"_id": job["_id"]}) or job
+
+
 async def cancel_queued_job(*, job_id: str, collection: str) -> dict[str, Any] | None:
-    """Cancel if still queued. Returns the updated doc, or None if the race was lost."""
+    """Cancel a queued or abandoned in-flight job. None if it already finished."""
     db = get_db()
     col = db[collection]
     now = datetime.now(timezone.utc)
-    result = await col.update_one(
-        {"_id": job_id, "status": _QUEUED},
+    result = await col.find_one_and_update(
+        {"_id": job_id, "status": {"$in": list(_ACTIVE_CANCEL)}},
         {
             "$set": {
                 "status": "cancelled",
@@ -419,8 +480,9 @@ async def cancel_queued_job(*, job_id: str, collection: str) -> dict[str, Any] |
                 "updated_at": now,
             }
         },
+        return_document=ReturnDocument.AFTER,
     )
-    if result.modified_count == 0:
+    if not result:
         return None
     await schedule_queued_jobs()
-    return await col.find_one({"_id": job_id})
+    return result
