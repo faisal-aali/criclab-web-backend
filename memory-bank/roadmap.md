@@ -31,6 +31,7 @@ High-level features. Detail lives in `tasks/`.
 | FEAT-024 | Coaching bookings | Planned | Collections + indexes ready; no service or UI yet |
 | FEAT-025 | RAG assistant | Planned | `kb_chunks` indexed; no retrieval or UI yet |
 | FEAT-031 | **Daily video quota** | Done | 60 starts/UTC day; FIFO overflow; `expected_start_at`; analysis notify |
+| FEAT-032 | **Glacier originals** | Done | Archive `original/` to Glacier Flexible Retrieval when the job is finished for good |
 
 ## Change log
 
@@ -165,3 +166,8 @@ High-level features. Detail lives in `tasks/`.
   worker EC2 only when a queued clip can begin now. A lifespan loop (not cron)
   recomputes at boot and at 00:00 UTC so leftover FIFO jobs start after the cap
   resets. Wake retries while the instance is still stopping.
+- **3 Sep 2026 (TASK-015 / FEAT-032):** Finished originals move to Glacier Flexible
+  Retrieval immediately (`completed`, `failed`, queued-`cancelled`). Age-based
+  lifecycle is forbidden — quota overflow still needs GetObject. In-flight cancel
+  does not archive. Stale `claimed` is re-queued; stale `processing`/`analyzing`
+  fails and archives. Reused Glacier keys are rejected on POST.

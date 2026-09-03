@@ -10,6 +10,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import mimetypes
 import time
 from datetime import datetime, timezone
@@ -21,7 +22,11 @@ from uuid import uuid4
 
 from app.config import get_settings
 
+log = logging.getLogger("criclab.s3")
+
 PREFIXES = ("original/", "compressed/", "overlays/", "files/")
+ARCHIVED_STORAGE_CLASSES = frozenset({"GLACIER", "DEEP_ARCHIVE", "GLACIER_IR"})
+GLACIER_FLEXIBLE = "GLACIER"
 _VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 _GENERIC_CONTENT_TYPES = frozenset(
     {"", "application/octet-stream", "binary/octet-stream"}
@@ -150,6 +155,70 @@ def incoming_original_key(value: str | None) -> str | None:
     if is_our_object_key(path) and path.startswith("original/"):
         return path
     return None
+
+
+def original_object_key(key: str | None) -> str | None:
+    """`original/…` only. None if missing or not one of ours."""
+    k = (key or "").strip().lstrip("/")
+    if not is_our_object_key(k) or not k.startswith("original/"):
+        return None
+    return k
+
+
+def is_archived_storage_class(value: str | None) -> bool:
+    return (value or "").upper() in ARCHIVED_STORAGE_CLASSES
+
+
+def _s3_error_code(exc: BaseException) -> str:
+    resp = getattr(exc, "response", None)
+    if not isinstance(resp, dict):
+        return ""
+    return str((resp.get("Error") or {}).get("Code") or "")
+
+
+def head_original(key: str) -> dict[str, Any] | None:
+    """Storage class for an original. None if S3 is off or the object is missing."""
+    k = original_object_key(key)
+    if not k or not s3_configured():
+        return None
+    try:
+        obj = _s3_client().head_object(Bucket=get_settings().s3_bucket, Key=k)
+    except Exception as exc:
+        if _s3_error_code(exc) in {"404", "NoSuchKey", "NotFound"}:
+            log.info("original missing at %s", k)
+            return None
+        log.warning("head_original failed for %s: %s", k, exc)
+        return None
+    return {
+        "key": k,
+        "storage_class": (obj.get("StorageClass") or "STANDARD").upper(),
+    }
+
+
+def archive_original(key: str) -> str | None:
+    """Same-key CopyObject to Glacier Flexible Retrieval. None if skipped or failed."""
+    k = original_object_key(key)
+    if not k or not s3_configured():
+        return None
+    head = head_original(k)
+    if head is None:
+        return None
+    if is_archived_storage_class(head.get("storage_class")):
+        return str(head["storage_class"])
+    bucket = get_settings().s3_bucket
+    try:
+        _s3_client().copy_object(
+            Bucket=bucket,
+            Key=k,
+            CopySource={"Bucket": bucket, "Key": k},
+            StorageClass=GLACIER_FLEXIBLE,
+            MetadataDirective="COPY",
+        )
+    except Exception:
+        log.exception("glacier copy failed for %s", k)
+        return None
+    log.info("archived original %s → %s", k, GLACIER_FLEXIBLE)
+    return GLACIER_FLEXIBLE
 
 
 def _aws_v4_signing_key(secret: str, datestamp: str, region: str) -> bytes:

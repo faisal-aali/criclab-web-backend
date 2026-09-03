@@ -19,7 +19,7 @@ from pymongo import ReturnDocument, UpdateOne
 from app.config import get_settings
 from app.db.mongo import get_db
 from app.pipeline.eta import DEFAULT_TOTAL_SECONDS, _historical_average_seconds, estimate_eta_seconds
-from app.services import email_service, notification_service
+from app.services import email_service, notification_service, original_archive
 
 log = logging.getLogger("criclab.quota")
 
@@ -403,12 +403,12 @@ async def midnight_wake_loop(*, slice_seconds: float = 30.0) -> None:
         await asyncio.sleep(min(chunk, remaining))
 
 
-_STALE_IN_FLIGHT = timedelta(minutes=45)
+_STALE_IN_FLIGHT = timedelta(hours=1)
 _ACTIVE_CANCEL = (_QUEUED, *_IN_FLIGHT)
 
 
 async def fail_stale_in_flight_jobs() -> int:
-    """Mark claimed/processing jobs with no progress for 45+ minutes as failed.
+    """Mark claimed/processing jobs with no progress for 1+ hour as failed.
 
     A dead worker leaves rows in `processing` forever. The header polls this
     collection, so ghosts stay on screen until they are closed out.
@@ -430,8 +430,26 @@ async def fail_stale_in_flight_jobs() -> int:
     }
     n = 0
     db = get_db()
+    to_archive: list[dict[str, Any]] = []
     for name in ("jobs", "balltrack_jobs"):
-        n += (await db[name].update_many(filt, {"$set": fields})).modified_count
+        docs = await db[name].find(filt, {"_id": 1, "video_id": 1, "session_id": 1}).to_list(500)
+        if not docs:
+            continue
+        result = await db[name].update_many(
+            {"_id": {"$in": [d["_id"] for d in docs]}, "status": {"$in": list(_IN_FLIGHT)}},
+            {"$set": fields},
+        )
+        n += result.modified_count
+        to_archive.extend(docs)
+    for job in to_archive:
+        try:
+            await original_archive.maybe_archive_for_job(job)
+        except Exception:
+            log.exception("glacier archive after stale fail %s", job.get("_id"))
+    try:
+        await original_archive.sweep_orphan_originals()
+    except Exception:
+        log.exception("glacier orphan sweep failed")
     return n
 
 
@@ -461,7 +479,13 @@ async def fail_stale_job(job: dict[str, Any] | None, *, collection: str) -> dict
             }
         },
     )
-    return await col.find_one({"_id": job["_id"]}) or job
+    refreshed = await col.find_one({"_id": job["_id"]}) or job
+    if refreshed.get("status") == "failed":
+        try:
+            await original_archive.maybe_archive_for_job(refreshed)
+        except Exception:
+            log.exception("glacier archive after stale fail %s", job["_id"])
+    return refreshed
 
 
 async def cancel_queued_job(*, job_id: str, collection: str) -> dict[str, Any] | None:

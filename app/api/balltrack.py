@@ -8,13 +8,13 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.api.deps import CurrentUser, VerifiedUser, visible_to
-from app.api.videos import _incoming_source_key
+from app.api.videos import _incoming_source_key, _reject_archived_original
 from app.balltrack import repo
 from app.balltrack.stumps import detect_stump_sets
 from app.config import get_settings
 from app.pipeline import quota
 from app.pipeline.eta import estimate_eta_seconds
-from app.services import s3_service
+from app.services import original_archive, s3_service
 
 router = APIRouter(prefix="/balltrack", tags=["balltrack"])
 
@@ -130,6 +130,7 @@ async def create_session(
     stored_name = original_name
     incoming_key = _incoming_source_key(source_key, source_url)
     if incoming_key:
+        _reject_archived_original(incoming_key)
         suffix = Path(incoming_key).suffix.lower() or ".mp4"
         if suffix not in _VIDEO_SUFFIXES:
             suffix = ".mp4"
@@ -217,9 +218,12 @@ async def cancel_job(job_id: str, user: CurrentUser):
         raise HTTPException(404, "Job not found")
     if job.get("status") not in ("queued", "claimed", "processing", "analyzing"):
         raise HTTPException(409, "This clip has already finished")
+    prior = job.get("status")
     updated = await quota.cancel_queued_job(job_id=job_id, collection="balltrack_jobs")
     if not updated:
         raise HTTPException(409, "This clip has already finished")
+    if prior == "queued":
+        await original_archive.maybe_archive_for_job(updated)
     session_id = updated.get("session_id")
     if session_id:
         await repo.update_session(str(session_id), status="cancelled")

@@ -90,6 +90,10 @@ INDEXES: dict[str, list[IndexModel]] = {
         IndexModel([("user_id", ASCENDING), ("created_at", DESCENDING)], name="user_recent"),
         IndexModel([("created_at", DESCENDING)], name="created_desc"),
     ],
+    "videos": [
+        IndexModel([("source_key", ASCENDING)], name="by_source_key"),
+        IndexModel([("user_id", ASCENDING), ("created_at", DESCENDING)], name="user_recent"),
+    ],
     "jobs": [
         IndexModel([("user_id", ASCENDING), ("created_at", DESCENDING)], name="user_recent"),
         IndexModel([("status", ASCENDING), ("created_at", DESCENDING)], name="status_recent"),
@@ -103,6 +107,7 @@ INDEXES: dict[str, list[IndexModel]] = {
     ],
     "balltrack_sessions": [
         IndexModel([("user_id", ASCENDING), ("created_at", DESCENDING)], name="user_recent"),
+        IndexModel([("source_key", ASCENDING)], name="by_source_key"),
     ],
     "admin_broadcasts": [
         IndexModel([("created_at", DESCENDING)], name="created_desc"),

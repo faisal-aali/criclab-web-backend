@@ -353,7 +353,7 @@ Layout matches SpinLab’s processed clip, cricket labels only:
   numbers 1–4, playhead. Omit a tag if that phase was not seen.
 - **Event pause:** hold each of those frames for ~2.5 s (SpinLab-style freeze),
   with a CricLab event banner. Gentle 2× slow-mo between events in the delivery
-  window. Output 30 fps. Encode `avc1` → ffmpeg H.264 1280×720 1 Mbps for S3 `overlays/`.
+  window. Output 30 fps. Encode `avc1` → ffmpeg H.264 1280×720 1.5 Mbps for S3 `overlays/`.
 - **Playback normalisation:** playback is ~real-time outside the delivery
   window and 2× inside it *regardless of source fps* — a 200 fps slow-mo
   capture must not render as a ×7 crawl. Bottom-left progress % over a
@@ -486,10 +486,23 @@ Browser uploads originals to `original/` with an S3 presigned PUT. Mongo stores
 object keys (`source_key`, `compressed_key`, `overlay_key`, `pdf_key`)
 — never signed URLs. On delivery/session read this API
 mints CloudFront canned-policy signed GET URLs (~1 hour). Worker writes
-`compressed/` (720p / 30 fps / 1 Mbps of the original), `overlays/` (markup
+`compressed/` (720p / 30 fps / 1.5 Mbps of the original), `overlays/` (markup
 MP4s), and `files/` (PDF, pitch map). Upload failures never
 fail the job — fall back to `/artifacts/...` from local disk. Historic
 Cloudinary HTTPS links still play.
+
+**Originals → Glacier Flexible Retrieval (`GLACIER`)** when the job is finished
+for good: `completed`, `failed`, or `cancelled` while still `queued`. Do **not**
+archive on object age — quota overflow can leave a job `queued` for more than
+a week. Do **not** archive `claimed` / `processing` / `analyzing` (in-flight
+cancel leaves Standard; the worker archives when it later writes completed/
+failed). Stale `claimed` (1 hour) is re-queued, not archived. Stale
+`processing`/`analyzing` (1 hour) becomes `failed` and is archived. Skip if another live
+job shares `source_key`. Persist `source_storage_class` / `source_archived_at`
+on the video/session. Archive failures must not fail the job. Reusing a Glacier
+`source_key` on POST is 400 (“Upload the clip again”). Never archive
+`compressed/` / `overlays/` / `files/`. Glacier Flexible Retrieval bills a
+90-day minimum. Abandoned presigned PUTs (never POSTed) stay Standard.
 
 ## Anti-patterns (do not introduce)
 
@@ -506,6 +519,9 @@ Cloudinary HTTPS links still play.
 - Merging frontend source back into this repo (keep the split)
 - Persisting CloudFront signed URLs in Mongo (they expire; store object keys)
 - Transcoding video or running MediaPipe in this process (that is the video worker)
+- Age-based S3 lifecycle on `original/` (quota overflow still needs GetObject)
+- Archiving `compressed/` / `overlays/` / `files/` (CloudFront playback)
+- Glacier on in-flight cancel (worker may still be downloading)
 
 ## MVP workflow checklist
 

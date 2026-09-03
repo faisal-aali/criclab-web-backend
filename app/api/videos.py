@@ -14,7 +14,7 @@ from app.db import repository as repo
 from app.pipeline import quota
 from app.pipeline.eta import estimate_eta_seconds
 from app.pipeline.profile import parse_player_profile
-from app.services import s3_service
+from app.services import original_archive, s3_service
 
 router = APIRouter(tags=["analysis"])
 
@@ -67,6 +67,7 @@ async def _store_incoming_video(
     """
     key = _incoming_source_key(source_key, source_url)
     if key:
+        _reject_archived_original(key)
         suffix = Path(key).suffix.lower() or ".mp4"
         if suffix not in _VIDEO_SUFFIXES:
             suffix = ".mp4"
@@ -84,6 +85,15 @@ async def _store_incoming_video(
     with dest.open("wb") as out:
         shutil.copyfileobj(file.file, out)
     return dest, file.filename, None
+
+
+def _reject_archived_original(key: str) -> None:
+    """A reused Glacier key cannot be analysed — ask for a fresh upload."""
+    if not s3_service.s3_configured():
+        return
+    head = s3_service.head_original(key)
+    if head and s3_service.is_archived_storage_class(head.get("storage_class")):
+        raise HTTPException(400, "Upload the clip again")
 
 
 @router.post("/videos")
@@ -207,9 +217,12 @@ async def cancel_job(job_id: str, user: CurrentUser):
         raise HTTPException(404, "Job not found")
     if job.get("status") not in ("queued", "claimed", "processing", "analyzing"):
         raise HTTPException(409, "This clip has already finished")
+    prior = job.get("status")
     updated = await quota.cancel_queued_job(job_id=job_id, collection="jobs")
     if not updated:
         raise HTTPException(409, "This clip has already finished")
+    if prior == "queued":
+        await original_archive.maybe_archive_for_job(updated)
     return {"id": updated["_id"], "status": updated.get("status")}
 
 

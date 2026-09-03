@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 from cryptography.hazmat.primitives import serialization
@@ -207,6 +207,64 @@ class OriginalVideoUrlTests(unittest.TestCase):
                 patch("app.api.videos.get_settings", return_value=_Settings()),
             ):
                 self.assertEqual(_original_video_url(video), "/media/videos/vid_local.mp4")
+
+
+class ArchiveOriginalTests(unittest.TestCase):
+    def test_original_object_key_rejects_playback_prefixes(self) -> None:
+        self.assertEqual(s3_service.original_object_key("original/u1/a.mp4"), "original/u1/a.mp4")
+        self.assertIsNone(s3_service.original_object_key("compressed/vid.mp4"))
+        self.assertIsNone(s3_service.original_object_key("overlays/job.mp4"))
+
+    def test_archive_no_op_when_s3_off(self) -> None:
+        settings = _CfSettings()
+        settings.s3_bucket = None
+        with patch("app.services.s3_service.get_settings", return_value=settings):
+            self.assertIsNone(s3_service.archive_original("original/u1/a.mp4"))
+
+    def test_already_glacier_skips_copy(self) -> None:
+        settings = _CfSettings()
+        client = MagicMock()
+        client.head_object.return_value = {"StorageClass": "GLACIER"}
+        with (
+            patch("app.services.s3_service.get_settings", return_value=settings),
+            patch("app.services.s3_service._s3_client", return_value=client),
+        ):
+            self.assertEqual(s3_service.archive_original("original/u1/a.mp4"), "GLACIER")
+        client.copy_object.assert_not_called()
+
+    def test_copy_to_glacier_flexible(self) -> None:
+        settings = _CfSettings()
+        client = MagicMock()
+        client.head_object.return_value = {"StorageClass": "STANDARD"}
+        with (
+            patch("app.services.s3_service.get_settings", return_value=settings),
+            patch("app.services.s3_service._s3_client", return_value=client),
+        ):
+            self.assertEqual(s3_service.archive_original("original/u1/a.mp4"), "GLACIER")
+        client.copy_object.assert_called_once()
+        kwargs = client.copy_object.call_args.kwargs
+        self.assertEqual(kwargs["StorageClass"], "GLACIER")
+        self.assertEqual(kwargs["MetadataDirective"], "COPY")
+        self.assertEqual(kwargs["Key"], "original/u1/a.mp4")
+
+
+class RejectArchivedOriginalTests(unittest.TestCase):
+    def test_raises_when_object_is_glacier(self) -> None:
+        from fastapi import HTTPException
+
+        from app.api.videos import _reject_archived_original
+
+        with (
+            patch("app.api.videos.s3_service.s3_configured", return_value=True),
+            patch(
+                "app.api.videos.s3_service.head_original",
+                return_value={"key": "original/u1/a.mp4", "storage_class": "GLACIER"},
+            ),
+        ):
+            with self.assertRaises(HTTPException) as ctx:
+                _reject_archived_original("original/u1/a.mp4")
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(ctx.exception.detail, "Upload the clip again")
 
 
 if __name__ == "__main__":

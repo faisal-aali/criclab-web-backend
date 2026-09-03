@@ -63,7 +63,7 @@ criclab-web-backend/
 │   ├── coaching/         # drills.json catalog I/O for Train / admin
 │   ├── agent/            # chat assistant LLM (not video coaching)
 │   ├── assistant/        # RAG knowledge + chat
-│   ├── services/         # S3 presign + CloudFront signed GET, email, bookings, …
+│   ├── services/         # S3 presign + CloudFront signed GET, Glacier originals, email, bookings, …
 │   ├── db/               # Mongo
 │   ├── config.py
 │   └── main.py
@@ -138,6 +138,9 @@ ollama list   # expect gemma3:4b, nomic-embed-text
 | `CLOUDFRONT_KEY_PAIR_ID` | Public key ID after uploading the RSA public key |
 | `CLOUDFRONT_PRIVATE_KEY` | RSA PEM in env (`\n` escapes ok). Never a file path. Website API only. |
 
+IAM on both boxes needs `s3:GetObject`, `s3:PutObject`, and `s3:HeadObject` on
+`original/*` so a finished job can `CopyObject` to Glacier Flexible Retrieval
+(`StorageClass=GLACIER`). That class has a 90-day minimum storage charge.
 The worker does **not** get CloudFront variables. Do not persist signed URLs in Mongo.
 
 ## Constraints
