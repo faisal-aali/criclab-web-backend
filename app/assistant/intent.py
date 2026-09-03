@@ -52,9 +52,9 @@ _CHECKIN_RE = re.compile(
 )
 
 GREETINGS = [
-    "Hey! I'm the CricLab assistant. Ask me anything about filming a clip, what a number in your report means, booking a coach, or your account.\n\n## Go here\n- [Open Video Analysis](/app)\n- [Open Filming Guide](/record)\n- [Open Coaching](/app/coaching)",
-    "Hi — I can walk you through filming, your results, drills, or a coaching booking.\n\n## Go here\n- [Open Video Analysis](/app)\n- [Open Ball Flight](/app/ball-flight)\n- [Open Filming Guide](/record)",
-    "Hello! Tell me what you want to do in CricLab and I will take it step by step.\n\n## Go here\n- [Open Video Analysis](/app)\n- [Open Help / FAQ](/faq)",
+    "Hey! I'm the CricLab assistant. Ask me anything about filming a clip, what a number in your report means, booking a coach, or your account.\n\n## Go here\n- [Open Video Analysis](/app/action)\n- [Open Filming Guide](/record)\n- [Open Coaching](/app/coaching)",
+    "Hi — I can walk you through filming, your results, drills, or a coaching booking.\n\n## Go here\n- [Open Video Analysis](/app/action)\n- [Open Ball Flight](/app/ball-flight)\n- [Open Filming Guide](/record)",
+    "Hello! Tell me what you want to do in CricLab and I will take it step by step.\n\n## Go here\n- [Open Video Analysis](/app/action)\n- [Open Help / FAQ](/faq)",
 ]
 THANKS = [
     "You're welcome! Anything else I can help with?",

@@ -181,7 +181,7 @@ async def send_verification_otp(to: str, name: str, code: str, minutes: int) -> 
 
 
 async def send_welcome(to: str, name: str) -> bool:
-    url = f"{get_settings().app_base_url}/app"
+    url = f"{get_settings().app_base_url}/app/action"
     html = _shell(
         "Welcome to CricLab",
         _p(f"Your email is confirmed, {name} — CricLab is ready.")

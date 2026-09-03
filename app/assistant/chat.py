@@ -55,7 +55,7 @@ STREAM_FLUSH_CHARS = 48
 # forgotten passwords and untracked balls, because the model latched onto the
 # one example shown in the instructions rather than picking per the question.
 PAGE_LINKS: list[tuple[str, str, str]] = [
-    ("Video Analysis", "/app", "uploading a clip, starting a new Action analysis"),
+    ("Video Analysis", "/app/action", "uploading a clip, starting a new Action analysis"),
     ("Ball Flight", "/app/ball-flight", "line, length or ball-flight specific analysis"),
     ("Analytics / History", "/app/history", "past sessions, comparing deliveries over time"),
     ("Leaderboard", "/app/leaderboard", "top throws, fastest ball speed, ranking"),
@@ -69,7 +69,7 @@ PAGE_LINKS: list[tuple[str, str, str]] = [
     ("Help / FAQ", "/faq", "a general question this table does not otherwise cover"),
     ("Pricing", "/pricing", "plans, cost, billing"),
 ]
-_ALLOWED_HREFS = {path for _, path, _ in PAGE_LINKS} | {"/contact", "/features", "/how-it-works"}
+_ALLOWED_HREFS = {path for _, path, _ in PAGE_LINKS} | {"/contact", "/features", "/how-it-works", "/app"}
 _HREF_TO_LABEL = {path: f"Open {label}" for label, path, _ in PAGE_LINKS}
 _PAGE_TABLE_TEXT = "\n".join(f"- {label}: {path} — for questions about {when}" for label, path, when in PAGE_LINKS)
 
@@ -241,7 +241,7 @@ def _strip_leading_duplicate(text: str, last_href: str | None) -> str:
 # and fill in the href deterministically. Order matters — more specific labels
 # must be checked before the generic ones they'd otherwise be swallowed by.
 _LABEL_HREF_HINTS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\bvideo analysis\b|\bdashboard\b|\bupload\b", re.IGNORECASE), "/app"),
+    (re.compile(r"\bvideo analysis\b|\bdashboard\b|\bupload\b", re.IGNORECASE), "/app/action"),
     (re.compile(r"\bball flight\b", re.IGNORECASE), "/app/ball-flight"),
     (re.compile(r"\bleaderboard\b|\btop throws?\b|\bfastest\b", re.IGNORECASE), "/app/leaderboard"),
     (re.compile(r"\banalytics\b|\bhistory\b|\bpast sessions?\b", re.IGNORECASE), "/app/history"),

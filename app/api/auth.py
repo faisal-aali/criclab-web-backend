@@ -224,7 +224,7 @@ async def verify_email(body: OtpIn, tasks: BackgroundTasks, client: Client):
         user_id=user["_id"], kind="account",
         title="Email confirmed",
         body="Your account is fully set up. Film a delivery to get your first analysis.",
-        link="/app",
+        link="/app/action",
     )
     return {"status": "verified", **await _issue_tokens(user, client)}
 
