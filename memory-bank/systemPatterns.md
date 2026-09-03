@@ -11,15 +11,15 @@ Never ask `gemma3:4b` to estimate speed/angles from raw video frames (that *incr
 ```text
 Upload (this API) → queued Mongo job
   → criclab-video-service worker: POSE → action → calibrate → track → metrics
-    → overlay → Cloudinary → Gemma narrative + drill matching → PDF
-      → persist delivery → React polls this API
+    → overlay → S3 overlays/ → Gemma narrative + drill matching → PDF → S3 files/
+      → persist delivery → React polls this API (CloudFront signed GET)
 ```
 
 ## Three processes (do not treat `app` as one package)
 
 | Process | Repo | Owns |
 |---------|------|------|
-| Website API | **this repo** | Auth, upload, insert `queued` jobs, job/delivery **reads**, stump *still* calibration, signed Cloudinary upload, chat assistant, Train catalog HTTP, bookings |
+| Website API | **this repo** | Auth, upload, insert `queued` jobs, job/delivery **reads**, stump *still* calibration, S3 presigned PUT + CloudFront signed GET, chat assistant, Train catalog HTTP, bookings |
 | Video worker | `criclab-video-service` | Everything after claim: MediaPipe/OpenCV, metrics, overlay, PDF, Gemma *video* notes, drill matching, overlay/PDF upload, delivery **writes** |
 | UI | `criclab-web-frontend` | Display API JSON only |
 
@@ -353,7 +353,7 @@ Layout matches SpinLab’s processed clip, cricket labels only:
   numbers 1–4, playhead. Omit a tag if that phase was not seen.
 - **Event pause:** hold each of those frames for ~2.5 s (SpinLab-style freeze),
   with a CricLab event banner. Gentle 2× slow-mo between events in the delivery
-  window. Output 30 fps. Encode `avc1` → `mp4v`; Cloudinary `q_auto,vc_h264`.
+  window. Output 30 fps. Encode `avc1` → ffmpeg H.264 1280×720 1 Mbps for S3 `overlays/`.
 - **Playback normalisation:** playback is ~real-time outside the delivery
   window and 2× inside it *regardless of source fps* — a 200 fps slow-mo
   capture must not render as a ×7 crawl. Bottom-left progress % over a
@@ -480,14 +480,16 @@ Agent answers should cite measured differences, not vibes.
    catalog drill titles with YouTube URLs as text links (no iframes) +
    release-frame evidence image
 
-## Cloudinary
+## Object storage (S3 + CloudFront)
 
-Processed overlay video (`{job_id}_overlay`, folder `criclab/videos`) and PDF
-(`{job_id}_report`, folder `criclab/reports`) are uploaded; the delivery stores
-`artifacts.cloudinary_video_url` (playback, h264) and `cloudinary_pdf_url`. Upload
-failures never fail the job — the app falls back to serving `/artifacts/...` from
-local disk. Creds live in `.env` (`CLOUDINARY_URL` or the three explicit
-fields).
+Browser uploads originals to `original/` with an S3 presigned PUT. Mongo stores
+object keys (`source_key`, `compressed_key`, `overlay_key`, `pdf_key`)
+— never signed URLs. On delivery/session read this API
+mints CloudFront canned-policy signed GET URLs (~1 hour). Worker writes
+`compressed/` (720p / 30 fps / 1 Mbps of the original), `overlays/` (markup
+MP4s), and `files/` (PDF, pitch map). Upload failures never
+fail the job — fall back to `/artifacts/...` from local disk. Historic
+Cloudinary HTTPS links still play.
 
 ## Anti-patterns (do not introduce)
 
@@ -502,6 +504,8 @@ fields).
 - Monolithic “analyze_everything.py” with no stage boundaries
 - Reintroducing Notera (notes/PWA) or Next.js-as-frontend assumptions into this product
 - Merging frontend source back into this repo (keep the split)
+- Persisting CloudFront signed URLs in Mongo (they expire; store object keys)
+- Transcoding video or running MediaPipe in this process (that is the video worker)
 
 ## MVP workflow checklist
 
@@ -510,7 +514,7 @@ fields).
 3. Detect throwing side (profile bowling_arm wins), release (leave-hand) + action phases  
 4. Resolve scale from body height; calculate biomechanics metrics + scores (ok metrics only)  
 5. Render slow-motion overlay video (pose + release + metrics)  
-6. Upload processed video to Cloudinary (return shareable URL)  
+6. Encode overlay + upload to S3 `overlays/` (CloudFront signed GET at read time)  
 7. Generate AI bowling analysis via Gemma (from metrics JSON only) + catalog drills  
-8. Build SpinLab-style PDF with event stills + tables + drill URLs (+ upload to Cloudinary)  
+8. Build SpinLab-style PDF with event stills + tables + drill URLs (+ upload to S3 `files/`)  
 9. Persist delivery in MongoDB; display on React results page with trajectory + DrillShelf  

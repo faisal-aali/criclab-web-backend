@@ -14,7 +14,7 @@ This repo is the **browser-facing FastAPI**: accounts, upload, job queue insert,
 | OpenCV (stills) | `opencv-contrib-python-headless` | Ball-flight **stump photo** boxes only |
 | Local LLM | **Ollama + `gemma3:4b`** | Website **chat assistant** (not video coaching notes) |
 | Embeddings | **Ollama + `nomic-embed-text`** | Assistant RAG |
-| Object storage | **Cloudinary** | Signed browser upload; overlay/PDF upload is the worker |
+| Object storage | **S3 + CloudFront** | Presigned PUT for originals; worker uploads overlay/PDF; this API signs GET |
 | Email | SMTP | OTP, recovery, notifications |
 
 Video OpenCV, MediaPipe, matplotlib PDF, and drill matching live in `criclab-video-service`.
@@ -45,12 +45,11 @@ FastAPI is the only process the React app talks to. Heavy CV stays in a worker s
 ## High-level data flow
 
 ```text
-Vite React (upload)  [criclab-web-frontend]
-  → FastAPI /videos or /balltrack  [this repo]
-    → Mongo job status=queued
-      → criclab-video-service worker claims
-        → CV → overlay → Gemma notes + matching → PDF → delivery write
-          → React polls this API /jobs + /deliveries
+Vite React GET /videos/upload-params → PUT original/ to S3
+  → FastAPI POST /videos or /balltrack with source_key  [this repo]
+    → Mongo stores keys (not signed URLs), job status=queued
+      → criclab-video-service worker GetObject → CV → overlay/files → keys
+        → React polls this API; responses include CloudFront signed GET (~1 hour)
 ```
 
 ## Repo layout (this backend)
@@ -64,7 +63,7 @@ criclab-web-backend/
 │   ├── coaching/         # drills.json catalog I/O for Train / admin
 │   ├── agent/            # chat assistant LLM (not video coaching)
 │   ├── assistant/        # RAG knowledge + chat
-│   ├── services/         # cloudinary signed upload, email, bookings, …
+│   ├── services/         # S3 presign + CloudFront signed GET, email, bookings, …
 │   ├── db/               # Mongo
 │   ├── config.py
 │   └── main.py
@@ -129,11 +128,23 @@ cd ../criclab-video-service && python -m app.worker
 ollama list   # expect gemma3:4b, nomic-embed-text
 ```
 
+## Environment (storage)
+
+| Variable | Purpose |
+|----------|---------|
+| `S3_BUCKET` / `S3_REGION` | Presigned PUT. Empty keeps local multipart upload. `S3_REGION` is `ap-south-1`, not Bedrock’s `AWS_REGION`. |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Same IAM user as Bedrock if it has S3; omit on EC2 instance role |
+| `CLOUDFRONT_DOMAIN` | Distribution hostname, no `https://` |
+| `CLOUDFRONT_KEY_PAIR_ID` | Public key ID after uploading the RSA public key |
+| `CLOUDFRONT_PRIVATE_KEY` | RSA PEM in env (`\n` escapes ok). Never a file path. Website API only. |
+
+The worker does **not** get CloudFront variables. Do not persist signed URLs in Mongo.
+
 ## Constraints
 
 - Do not put frame measurement logic in Gemma (and do not run the video pipeline in this process)
 - Catalog HTTP stays here; drill matching after CV stays in `criclab-video-service`
 - MongoDB is the system of record for analyses and history
 - Frontend is a separate repo (`criclab-web-frontend`); do not reintroduce a monorepo layout here
-- Mongo, Cloudinary, and `STORAGE_DIR` must match the video service
+- Mongo, S3, and `STORAGE_DIR` must match the video service
 - Production: this API + frontend share an **always-on** EC2; the video worker is a **separate** instance that idle-stops. This process pokes that worker when a job is claimable and at 00:00 UTC.

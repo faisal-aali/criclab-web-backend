@@ -6,9 +6,9 @@ motor>=3.6.0
 # Still photo stump boxes for Ball flight calibration. Video OpenCV lives in criclab-video-service.
 opencv-contrib-python-headless==4.11.0.86
 numpy<2
-cloudinary>=1.40.0
 httpx>=0.27.0
 boto3>=1.35.0
+cryptography>=43.0.0
 pydantic-settings>=2.6.0
 python-dotenv>=1.0.0
 pyjwt>=2.9.0

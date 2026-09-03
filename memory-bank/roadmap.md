@@ -12,8 +12,8 @@ High-level features. Detail lives in `tasks/`.
 | FEAT-006 | Calibration | Done (basic) | Scale from pose body height or provided reference |
 | FEAT-007 | **Biomechanics metrics** | Done | Leave-hand arm speed, joint angles, timing, rotation proxies, scores from ok metrics only |
 | FEAT-008 | **Slow-mo overlay video** | Done | SpinLab HUD: colour frames + 2×2 tiles + BFC/FFC/MER/REL/FT timeline |
-| FEAT-009 | **Cloudinary hosting** | Done | Upload processed video + PDF; return shareable URLs |
-| FEAT-010 | Results dashboard | Done | Cloudinary video + URL, metric cards, score rings, AI sections |
+| FEAT-009 | **S3 + CloudFront hosting** | Done | Presigned PUT originals; worker overlay/PDF; signed GET playback |
+| FEAT-010 | Results dashboard | Done | Overlay video + URL, metric cards, score rings, AI sections |
 | FEAT-011 | AI agent (Gemma) | Done | Coaching from metrics JSON; catalog-only drill IDs via `gemma3:4b` |
 | FEAT-012 | **SpinLab-style PDF** | Done | Event stills + tiles, sequencing, charts, tables, AI notes + drill URLs |
 | FEAT-013 | History & compare | Done (basic) | History list + compare delta in agent report |

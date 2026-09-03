@@ -14,7 +14,7 @@ from app.db import repository as repo
 from app.pipeline import quota
 from app.pipeline.eta import estimate_eta_seconds
 from app.pipeline.profile import parse_player_profile
-from app.services import cloudinary_service
+from app.services import s3_service
 
 router = APIRouter(tags=["analysis"])
 
@@ -22,40 +22,60 @@ _VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 
 
 @router.get("/videos/upload-params")
-async def video_upload_params(_: VerifiedUser):
-    """Signed Cloudinary fields so the browser can POST the clip off-Vercel."""
-    params = cloudinary_service.signed_video_upload_params()
+async def video_upload_params(
+    user: VerifiedUser,
+    filename: str = "",
+    content_type: str = "video/mp4",
+):
+    """S3 presigned PUT so the browser can upload the clip off this API."""
+    if not s3_service.s3_configured():
+        return {"configured": False}
+    key = s3_service.original_key(user["_id"], filename)
+    params = s3_service.presigned_put(key, content_type)
     if not params:
         return {"configured": False}
     return {"configured": True, **params}
+
+
+def _incoming_source_key(source_key: str | None, source_url: str | None) -> str | None:
+    if (source_key or "").strip():
+        key = s3_service.incoming_original_key(source_key)
+        if not key:
+            raise HTTPException(400, "Video key is not from our upload host")
+        return key
+    url = (source_url or "").strip()
+    if not url:
+        return None
+    key = s3_service.incoming_original_key(url)
+    if not key:
+        raise HTTPException(400, "Video URL is not from our upload host")
+    return key
 
 
 async def _store_incoming_video(
     *,
     dest: Path,
     file: UploadFile | None,
+    source_key: str | None,
     source_url: str | None,
     original_name: str | None,
 ) -> tuple[Path, str, str | None]:
-    """Write a local upload now, or return a Cloudinary URL to fetch in the job.
+    """Write a local upload now, or record an S3 object key for the worker.
 
     Fetching the remote clip inside this request blocked POST /videos — the UI
-    sat on "Uploading…" with no job to poll. The background task reports ingest
-    progress instead.
+    sat on "Uploading…" with no job to poll. The worker downloads by key.
     """
-    url = (source_url or "").strip()
-    if url:
-        if not cloudinary_service.is_cloudinary_url(url):
-            raise HTTPException(400, "Video URL is not from our upload host")
-        suffix = Path(urlparse_path(url)).suffix.lower() or ".mp4"
+    key = _incoming_source_key(source_key, source_url)
+    if key:
+        suffix = Path(key).suffix.lower() or ".mp4"
         if suffix not in _VIDEO_SUFFIXES:
             suffix = ".mp4"
         dest = dest.with_suffix(suffix)
-        name = original_name or Path(urlparse_path(url)).name or dest.name
-        return dest, name, url
+        name = original_name or Path(key).name or dest.name
+        return dest, name, key
 
     if not file or not file.filename:
-        raise HTTPException(400, "Attach a video or a source_url")
+        raise HTTPException(400, "Attach a video or a source_key")
     suffix = Path(file.filename).suffix.lower() or ".mp4"
     if suffix not in _VIDEO_SUFFIXES:
         raise HTTPException(400, "Unsupported video type")
@@ -66,16 +86,11 @@ async def _store_incoming_video(
     return dest, file.filename, None
 
 
-def urlparse_path(url: str) -> str:
-    from urllib.parse import urlparse
-
-    return urlparse(url).path
-
-
 @router.post("/videos")
 async def upload_video(
     user: VerifiedUser,
     file: UploadFile | None = File(None),
+    source_key: str | None = Form(None),
     source_url: str | None = Form(None),
     original_name: str | None = Form(None),
     player_name: str = Form("Bowler"),
@@ -111,9 +126,10 @@ async def upload_video(
 
     video_id = repo.new_id("vid")
     job_id = repo.new_id("job")
-    dest, stored_name, remote_url = await _store_incoming_video(
+    dest, stored_name, incoming_key = await _store_incoming_video(
         dest=videos_dir / video_id,
         file=file,
+        source_key=source_key,
         source_url=source_url,
         original_name=original_name,
     )
@@ -123,7 +139,9 @@ async def upload_video(
         "user_id": user["_id"],
         "original_name": stored_name,
         "path": str(dest),
-        "source_url": remote_url,
+        "source_key": incoming_key,
+        "source_url": None,
+        "compressed_key": None,
         "content_type": (file.content_type if file else "video/mp4"),
         "player_name": profile["player_name"],
         "player_profile": profile,
@@ -206,18 +224,54 @@ async def get_job(job_id: str, user: CurrentUser):
     return job
 
 
-def _original_video_url(video: dict[str, Any] | None) -> str | None:
-    """Before · your clip: Cloudinary H.264 derivative, else a local file.
+def _https_or_local(signed: str | None, legacy: str | None, local: str | None) -> str | None:
+    return signed or legacy or local
 
-    ``videos.path`` is often a worker machine path and 404s here. Prefer
-    ``source_url`` rewritten with ``f_mp4,vc_h264`` so Chrome can play iPhone
-    HEVC uploads. Never return the raw ``.mov``.
+
+def _delivery_artifacts(d: dict[str, Any], video: dict[str, Any] | None = None) -> dict[str, Any]:
+    job_id = d.get("job_id")
+    art = d.get("artifacts") or {}
+    overlay = _https_or_local(
+        s3_service.signed_get(art.get("overlay_key")),
+        art.get("cloudinary_video_url"),
+        f"/artifacts/{job_id}/overlay.mp4" if job_id else None,
+    )
+    pdf = _https_or_local(
+        s3_service.signed_get(art.get("pdf_key")),
+        art.get("cloudinary_pdf_url"),
+        f"/artifacts/{job_id}/bowling_report.pdf" if job_id else None,
+    )
+    still = _https_or_local(
+        s3_service.signed_get(art.get("release_still_key")),
+        None,
+        f"/artifacts/{job_id}/release.jpg" if job_id else None,
+    )
+    compressed = s3_service.signed_get((video or {}).get("compressed_key") or art.get("compressed_key"))
+    return {
+        "pdf_url": pdf,
+        "overlay_video_url": overlay,
+        "release_still_url": still,
+        "original_video_url": _original_video_url(video) if video is not None else compressed,
+        "compressed_video_url": compressed,
+        "cloudinary_video_url": overlay,
+        "cloudinary_pdf_url": pdf,
+    }
+
+
+def _original_video_url(video: dict[str, Any] | None) -> str | None:
+    """Before · your clip: CloudFront-signed compressed H.264, else a local file.
+
+    Never return the raw ``original/`` object (often an iPhone HEVC ``.mov``).
+    Historic Cloudinary ``source_url`` rows still play via the old transform.
     """
     if not video:
         return None
+    signed = s3_service.signed_get(video.get("compressed_key"))
+    if signed:
+        return signed
     src = (video.get("source_url") or "").strip()
-    if src and cloudinary_service.is_cloudinary_url(src):
-        return cloudinary_service.browser_playback_url(src)
+    if src and s3_service.is_cloudinary_url(src):
+        return s3_service.legacy_cloudinary_playback_url(src)
     name = Path(video["path"]).name if video.get("path") else None
     if not name:
         return None
@@ -278,13 +332,7 @@ async def list_deliveries(user: CurrentUser, limit: int = 50):
                 "metrics": d.get("metrics"),
                 "analysis_summary": (d.get("analysis") or {}).get("summary"),
                 "cloudinary": d.get("cloudinary"),
-                "artifacts": {
-                    "pdf_url": f"/artifacts/{d.get('job_id')}/bowling_report.pdf" if d.get("job_id") else None,
-                    "overlay_video_url": f"/artifacts/{d.get('job_id')}/overlay.mp4" if d.get("job_id") else None,
-                    "release_still_url": f"/artifacts/{d.get('job_id')}/release.jpg" if d.get("job_id") else None,
-                    "cloudinary_video_url": (d.get("artifacts") or {}).get("cloudinary_video_url"),
-                    "cloudinary_pdf_url": (d.get("artifacts") or {}).get("cloudinary_pdf_url"),
-                },
+                "artifacts": _delivery_artifacts(d),
             }
         )
     return {"items": out}
@@ -309,14 +357,7 @@ async def get_delivery(delivery_id: str, user: CurrentUser):
         "action": d.get("action"),
         "release": d.get("release"),
         "cloudinary": d.get("cloudinary"),
-        "artifacts": {
-            "release_still_url": f"/artifacts/{d.get('job_id')}/release.jpg",
-            "overlay_video_url": f"/artifacts/{d.get('job_id')}/overlay.mp4",
-            "pdf_url": f"/artifacts/{d.get('job_id')}/bowling_report.pdf",
-            "original_video_url": _original_video_url(video),
-            "cloudinary_video_url": (d.get("artifacts") or {}).get("cloudinary_video_url"),
-            "cloudinary_pdf_url": (d.get("artifacts") or {}).get("cloudinary_pdf_url"),
-        },
+        "artifacts": _delivery_artifacts(d, video),
     }
 
 

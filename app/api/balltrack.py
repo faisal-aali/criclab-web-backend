@@ -8,12 +8,13 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.api.deps import CurrentUser, VerifiedUser, visible_to
+from app.api.videos import _incoming_source_key
 from app.balltrack import repo
 from app.balltrack.stumps import detect_stump_sets
 from app.config import get_settings
 from app.pipeline import quota
 from app.pipeline.eta import estimate_eta_seconds
-from app.services import cloudinary_service
+from app.services import s3_service
 
 router = APIRouter(prefix="/balltrack", tags=["balltrack"])
 
@@ -47,14 +48,33 @@ async def detect_stumps(
         raise HTTPException(422, str(exc)) from exc
 
 
+def _signed_artifact(art: dict, key_name: str, legacy_name: str, fallback: str | None) -> str | None:
+    signed = s3_service.signed_get(art.get(key_name))
+    return signed or art.get(legacy_name) or fallback
+
+
 def _public_session(doc: dict, deliveries: list[dict] | None = None) -> dict:
+    art = dict(doc.get("artifacts") or {})
+    job_id = art.get("job_id") or doc.get("job_id")
+    local_overlay = f"/balltrack/media/{job_id}/overlay.mp4" if job_id else art.get("overlay_url")
+    local_map = f"/balltrack/media/{job_id}/pitch_map.png" if job_id else art.get("pitch_map_url")
+    overlay = _signed_artifact(art, "overlay_key", "cloudinary_overlay_url", local_overlay)
+    pitch = _signed_artifact(art, "pitch_map_key", "cloudinary_pitch_map_url", local_map)
+    compressed = s3_service.signed_get(doc.get("compressed_key") or art.get("compressed_key"))
     out = {
         "id": doc["_id"],
         "title": doc.get("title") or "Session",
         "status": doc.get("status"),
         "created_at": doc.get("created_at"),
         "delivery_count": doc.get("delivery_count") or len(doc.get("delivery_ids") or []),
-        "artifacts": doc.get("artifacts") or {},
+        "artifacts": {
+            **art,
+            "overlay_url": overlay,
+            "pitch_map_url": pitch,
+            "cloudinary_overlay_url": overlay,
+            "cloudinary_pitch_map_url": pitch,
+            "compressed_video_url": compressed,
+        },
         "analysis": doc.get("analysis") or {},
         "error": doc.get("error"),
     }
@@ -64,6 +84,8 @@ def _public_session(doc: dict, deliveries: list[dict] | None = None) -> dict:
 
 
 def _public_delivery(d: dict) -> dict:
+    art = dict(d.get("artifacts") or {})
+    clip = _signed_artifact(art, "clip_key", "cloudinary_clip_url", art.get("clip_url"))
     return {
         "id": d["_id"],
         "session_id": d.get("session_id"),
@@ -71,7 +93,11 @@ def _public_delivery(d: dict) -> dict:
         "created_at": d.get("created_at"),
         "metrics": d.get("metrics"),
         "bounce": d.get("bounce"),
-        "artifacts": d.get("artifacts") or {},
+        "artifacts": {
+            **art,
+            "clip_url": clip,
+            "cloudinary_clip_url": clip,
+        },
     }
 
 
@@ -79,6 +105,7 @@ def _public_delivery(d: dict) -> dict:
 async def create_session(
     user: VerifiedUser,
     file: UploadFile | None = File(None),
+    source_key: str | None = Form(None),
     source_url: str | None = Form(None),
     original_name: str | None = Form(None),
     calibration: str = Form(...),
@@ -100,23 +127,17 @@ async def create_session(
     session_id = repo.new_id("bts")
     job_id = repo.new_id("btj")
     dest = videos_dir / session_id
-    url = (source_url or "").strip()
     stored_name = original_name
-    remote_url: str | None = None
-    if url:
-        if not cloudinary_service.is_cloudinary_url(url):
-            raise HTTPException(400, "Video URL is not from our upload host")
-        from urllib.parse import urlparse
-
-        suffix = Path(urlparse(url).path).suffix.lower() or ".mp4"
+    incoming_key = _incoming_source_key(source_key, source_url)
+    if incoming_key:
+        suffix = Path(incoming_key).suffix.lower() or ".mp4"
         if suffix not in _VIDEO_SUFFIXES:
             suffix = ".mp4"
         dest = dest.with_suffix(suffix)
-        stored_name = stored_name or Path(urlparse(url).path).name or dest.name
-        remote_url = url
+        stored_name = stored_name or Path(incoming_key).name or dest.name
     else:
         if not file or not file.filename:
-            raise HTTPException(400, "Attach a video or a source_url")
+            raise HTTPException(400, "Attach a video or a source_key")
         suffix = Path(file.filename).suffix.lower() or ".mp4"
         if suffix not in _VIDEO_SUFFIXES:
             raise HTTPException(400, "Unsupported video type")
@@ -132,7 +153,10 @@ async def create_session(
             "user_id": user["_id"],
             "title": title.strip() or "Ball Track session",
             "path": str(dest),
-            "source_url": remote_url,
+            "source_key": incoming_key,
+            "source_url": None,
+            "compressed_key": None,
+            "job_id": job_id,
             "original_name": stored_name,
             "calibration": cal,
             "status": "queued",
