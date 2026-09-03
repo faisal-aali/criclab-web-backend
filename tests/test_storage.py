@@ -72,10 +72,32 @@ class ObjectKeyTests(unittest.TestCase):
         self.assertEqual(parsed.scheme, "https")
         self.assertEqual(parsed.hostname, "criclab-s3-bucket.s3.ap-south-1.amazonaws.com")
         self.assertEqual(parsed.path, "/original/u1/a.mp4")
-        self.assertEqual(query.get("X-Amz-SignedHeaders"), ["host"])
+        self.assertEqual(query.get("X-Amz-SignedHeaders"), ["content-type;host"])
         self.assertEqual(query.get("X-Amz-Content-Sha256"), ["UNSIGNED-PAYLOAD"])
         self.assertTrue(query.get("X-Amz-Signature"))
-        self.assertEqual(params["headers"], {})
+        self.assertEqual(params["headers"], {"Content-Type": "video/mp4"})
+
+    def test_resolve_content_type_from_extension(self) -> None:
+        self.assertEqual(
+            s3_service.resolve_content_type("original/u1/a.mov"),
+            "video/quicktime",
+        )
+        self.assertEqual(
+            s3_service.resolve_content_type("original/u1/a.mp4"),
+            "video/mp4",
+        )
+        self.assertEqual(
+            s3_service.resolve_content_type("files/job_report.pdf"),
+            "application/pdf",
+        )
+        self.assertEqual(
+            s3_service.resolve_content_type("original/u1/a.mov", "video/mp4"),
+            "video/mp4",
+        )
+        self.assertEqual(
+            s3_service.resolve_content_type("original/u1/a.bin", "application/octet-stream"),
+            "application/octet-stream",
+        )
 
     def test_incoming_original_key_from_s3_url(self) -> None:
         settings = _CfSettings()

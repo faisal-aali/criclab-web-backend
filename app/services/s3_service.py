@@ -10,6 +10,7 @@ import base64
 import hashlib
 import hmac
 import json
+import mimetypes
 import time
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -22,6 +23,20 @@ from app.config import get_settings
 
 PREFIXES = ("original/", "compressed/", "overlays/", "files/")
 _VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+_GENERIC_CONTENT_TYPES = frozenset(
+    {"", "application/octet-stream", "binary/octet-stream"}
+)
+_SUFFIX_CONTENT_TYPES = {
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska",
+    ".webm": "video/webm",
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+}
 PUT_EXPIRES = 15 * 60
 GET_EXPIRES = 60 * 60
 PLAYBACK_TRANSFORMATION = "f_mp4,vc_h264"
@@ -81,6 +96,18 @@ def is_our_object_key(key: str | None) -> bool:
     return any(k.startswith(p) for p in PREFIXES)
 
 
+def resolve_content_type(name_or_key: str, hint: str | None = None) -> str:
+    """Pick a MIME type from a filename/object key, with an optional browser hint."""
+    hinted = (hint or "").strip().lower()
+    if hinted and hinted not in _GENERIC_CONTENT_TYPES:
+        return hinted
+    guessed, _ = mimetypes.guess_type(name_or_key)
+    if guessed:
+        return guessed
+    suffix = Path(name_or_key).suffix.lower()
+    return _SUFFIX_CONTENT_TYPES.get(suffix, "application/octet-stream")
+
+
 def original_key(user_id: str, filename: str | None) -> str:
     suffix = Path(filename or "").suffix.lower()
     if suffix not in _VIDEO_SUFFIXES:
@@ -132,13 +159,13 @@ def _aws_v4_signing_key(secret: str, datestamp: str, region: str) -> bytes:
     return hmac.new(k_service, b"aws4_request", hashlib.sha256).digest()
 
 
-def _presign_put_url(key: str) -> str | None:
+def _presign_put_url(key: str, content_type: str) -> str | None:
     """SigV4 query PUT that browsers can use.
 
     boto3's generate_presigned_url puts UNSIGNED-PAYLOAD in the canonical
     request but not in the query string. S3 then hashes the file body and
     returns SignatureDoesNotMatch. This signer adds X-Amz-Content-Sha256 to
-    the signed query and only signs ``host``.
+    the signed query and signs ``host`` plus ``content-type``.
     """
     settings = get_settings()
     bucket = (settings.s3_bucket or "").strip()
@@ -159,7 +186,7 @@ def _presign_put_url(key: str) -> str | None:
         "X-Amz-Credential": f"{access}/{credential_scope}",
         "X-Amz-Date": amz_date,
         "X-Amz-Expires": str(PUT_EXPIRES),
-        "X-Amz-SignedHeaders": "host",
+        "X-Amz-SignedHeaders": "content-type;host",
     }
     canonical_query = "&".join(
         f"{quote(name, safe='-_.~')}={quote(value, safe='-_.~')}"
@@ -167,7 +194,7 @@ def _presign_put_url(key: str) -> str | None:
     )
     canonical_request = (
         f"PUT\n{canonical_uri}\n{canonical_query}\n"
-        f"host:{host}\n\nhost\nUNSIGNED-PAYLOAD"
+        f"content-type:{content_type}\nhost:{host}\n\ncontent-type;host\nUNSIGNED-PAYLOAD"
     )
     string_to_sign = (
         f"AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n"
@@ -182,17 +209,17 @@ def _presign_put_url(key: str) -> str | None:
 
 
 def presigned_put(key: str, content_type: str) -> dict[str, Any] | None:
-    """Browser PUT of the original clip. Do not send extra signed headers."""
+    """Browser PUT of the original clip. Send only the signed Content-Type header."""
     if not s3_configured() or not is_our_object_key(key):
         return None
-    _ = content_type
-    url = _presign_put_url(key)
+    resolved = resolve_content_type(key, content_type)
+    url = _presign_put_url(key, resolved)
     if not url:
         return None
     return {
         "upload_url": url,
         "method": "PUT",
-        "headers": {},
+        "headers": {"Content-Type": resolved},
         "key": key,
     }
 

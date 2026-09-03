@@ -142,7 +142,10 @@ async def upload_video(
         "source_key": incoming_key,
         "source_url": None,
         "compressed_key": None,
-        "content_type": (file.content_type if file else "video/mp4"),
+        "content_type": s3_service.resolve_content_type(
+            incoming_key or stored_name,
+            file.content_type if file else None,
+        ),
         "player_name": profile["player_name"],
         "player_profile": profile,
         "created_at": repo.utcnow(),
