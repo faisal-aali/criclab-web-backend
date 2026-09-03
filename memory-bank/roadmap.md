@@ -32,6 +32,7 @@ High-level features. Detail lives in `tasks/`.
 | FEAT-025 | RAG assistant | Planned | `kb_chunks` indexed; no retrieval or UI yet |
 | FEAT-031 | **Daily video quota** | Done | 60 starts/UTC day; FIFO overflow; `expected_start_at`; analysis notify |
 | FEAT-032 | **Glacier originals** | Done | Archive `original/` to Glacier Flexible Retrieval when the job is finished for good |
+| FEAT-033 | **Honor in-flight cancel** | Done | Cancel stays `cancelled`; worker stops at next stage; quota slot stays used |
 
 ## Change log
 
@@ -169,5 +170,9 @@ High-level features. Detail lives in `tasks/`.
 - **3 Sep 2026 (TASK-015 / FEAT-032):** Finished originals move to Glacier Flexible
   Retrieval immediately (`completed`, `failed`, queued-`cancelled`). Age-based
   lifecycle is forbidden — quota overflow still needs GetObject. In-flight cancel
-  does not archive. Stale `claimed` is re-queued; stale `processing`/`analyzing`
-  fails and archives. Reused Glacier keys are rejected on POST.
+  is honored by the worker at the next stage, then archived. Stale `claimed` is
+  re-queued; stale `processing`/`analyzing` fails and archives. Reused Glacier
+  keys are rejected on POST.
+- **3 Sep 2026 (FEAT-033):** Cancel on a running job stays `cancelled`. Progress
+  writes cannot overwrite it. The worker finishes the current stage, skips the
+  rest, and does not persist a delivery. The daily slot stays used.

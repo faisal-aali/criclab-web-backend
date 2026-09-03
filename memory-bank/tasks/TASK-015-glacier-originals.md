@@ -13,14 +13,14 @@ Move `original/` to Glacier Flexible Retrieval (`StorageClass=GLACIER`) as soon 
 
 - `completed` (worker)
 - `failed` (worker, stale `processing`/`analyzing`, API stale-fail)
-- `cancelled` only if the job was still `queued`
+- `cancelled` while still `queued` (this API). In-flight cancel is archived by the worker after the next stage.
 
 Never archive `queued` / `claimed` / `processing` / `analyzing`. Stale `claimed` is re-queued. Skip if another live job shares `source_key`.
 
 ## Acceptance criteria
 
 - [x] `archive_original` + `head_original` in this API's `s3_service`
-- [x] Queued-cancel archives; in-flight cancel does not
+- [x] Queued-cancel archives here; in-flight cancel stays Standard until the worker stops at the next stage
 - [x] API stale-fail archives; orphan sweep on that path
 - [x] POST `/videos` and `/balltrack` reject an already-Glacier `source_key` (400, “Upload the clip again”)
 - [x] `videos.source_key` and `balltrack_sessions.source_key` indexes

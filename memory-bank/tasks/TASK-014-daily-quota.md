@@ -21,4 +21,4 @@ Cap video starts at `DAILY_VIDEO_QUOTA` (default 60) per UTC day, overflow FIFO 
 
 ## Notes
 
-The worker owns `quota_days.started`. This API never increments it. Slots are released on fail and stale re-queue, not on complete or queued-cancel. `insert_job` does not start the worker; `schedule_queued_jobs` may, via `maybe_wake_worker`.
+The worker owns `quota_days.started`. This API never increments it. Slots are released on fail and stale re-queue, not on complete, queued-cancel, or in-flight cancel (the start already counted). `insert_job` does not start the worker; `schedule_queued_jobs` may, via `maybe_wake_worker`.

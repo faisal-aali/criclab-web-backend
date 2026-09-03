@@ -492,17 +492,21 @@ fail the job — fall back to `/artifacts/...` from local disk. Historic
 Cloudinary HTTPS links still play.
 
 **Originals → Glacier Flexible Retrieval (`GLACIER`)** when the job is finished
-for good: `completed`, `failed`, or `cancelled` while still `queued`. Do **not**
+for good: `completed`, `failed`, or `cancelled`. Queued-cancel archives here.
+In-flight cancel (`claimed` / `processing` / `analyzing`) is written by this API
+but the worker honors it at the **next stage** — it does not persist a delivery
+and then archives. Until that stage ends the original stays Standard. Do **not**
 archive on object age — quota overflow can leave a job `queued` for more than
-a week. Do **not** archive `claimed` / `processing` / `analyzing` (in-flight
-cancel leaves Standard; the worker archives when it later writes completed/
-failed). Stale `claimed` (1 hour) is re-queued, not archived. Stale
+a week. Do **not** archive while a job is still `queued` / `claimed` /
+`processing` / `analyzing`. Stale `claimed` (1 hour) is re-queued, not archived. Stale
 `processing`/`analyzing` (1 hour) becomes `failed` and is archived. Skip if another live
 job shares `source_key`. Persist `source_storage_class` / `source_archived_at`
 on the video/session. Archive failures must not fail the job. Reusing a Glacier
 `source_key` on POST is 400 (“Upload the clip again”). Never archive
 `compressed/` / `overlays/` / `files/`. Glacier Flexible Retrieval bills a
 90-day minimum. Abandoned presigned PUTs (never POSTed) stay Standard.
+Progress writes (`update_job`) only apply while status is `claimed|processing|analyzing`
+so they cannot flip `cancelled` back to `processing`.
 
 ## Anti-patterns (do not introduce)
 
@@ -521,7 +525,7 @@ on the video/session. Archive failures must not fail the job. Reusing a Glacier
 - Transcoding video or running MediaPipe in this process (that is the video worker)
 - Age-based S3 lifecycle on `original/` (quota overflow still needs GetObject)
 - Archiving `compressed/` / `overlays/` / `files/` (CloudFront playback)
-- Glacier on in-flight cancel (worker may still be downloading)
+- Glacier on in-flight cancel before the worker has stopped (current stage may still be running)
 
 ## MVP workflow checklist
 

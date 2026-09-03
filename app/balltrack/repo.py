@@ -66,20 +66,24 @@ async def insert_job(doc: dict[str, Any]) -> str:
     return doc["_id"]
 
 
+_IN_FLIGHT = ("claimed", "processing", "analyzing")
+_ACTIVE = ("queued", *_IN_FLIGHT)
+
+
 async def update_job(job_id: str, **fields: Any) -> None:
     now = utcnow()
     fields["updated_at"] = now
     update: dict[str, Any] = {"$set": fields}
     if fields.get("status") in (None, "processing", "analyzing"):
         update["$min"] = {"started_at": now}
-    await _col_jobs().update_one({"_id": job_id}, update)
+    await _col_jobs().update_one(
+        {"_id": job_id, "status": {"$in": list(_IN_FLIGHT)}},
+        update,
+    )
 
 
 async def get_job(job_id: str) -> dict[str, Any] | None:
     return await _col_jobs().find_one({"_id": job_id})
-
-
-_ACTIVE = ("queued", "claimed", "processing", "analyzing")
 
 
 async def list_active_jobs(user_id: str, limit: int = 20) -> list[dict[str, Any]]:
