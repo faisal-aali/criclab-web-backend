@@ -32,6 +32,10 @@ things.
 
 - Keep it under 10 seconds and 100 MB. Landscape 1080p, tagged 120 or 240 fps.
 - MP4 and MOV only for Action.
+- If the take is longer or heavier, or you just want one delivery from a valid
+  clip, trim it on the Action upload page. That cut copies the original frames
+  — it does not re-encode. A few seconds of 4K 240 fps can still miss 100 MB;
+  shoot 1080p if size is the issue.
 - On a weak connection, wait for wifi — a large 4K file is a lot to push over
   mobile data, and 4K slow-mo often exceeds 100 MB.
 

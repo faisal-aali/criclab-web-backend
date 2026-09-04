@@ -52,4 +52,9 @@ until after the ball has bounced. One delivery per clip.
 ## Length and size
 
 Keep clips at **10 seconds or less** and **under 100 MB**. Longer or heavier
-files are rejected before analysis.
+files are rejected before analysis. On the Action upload page you can always
+trim a clip in the browser (even when the file already meets 10 s / 100 MB):
+that cut copies the original frames (no re-encode), so 120/240 fps and quality
+stay the same. Start may snap back to the previous keyframe. Lossless trim
+only reduces size with duration — a short 4K 240 fps file can still be over
+100 MB; shoot 1080p 120/240 instead.
