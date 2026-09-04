@@ -192,7 +192,19 @@ def head_original(key: str) -> dict[str, Any] | None:
     return {
         "key": k,
         "storage_class": (obj.get("StorageClass") or "STANDARD").upper(),
+        "content_length": int(obj.get("ContentLength") or 0),
     }
+
+
+def delete_original(key: str) -> None:
+    """Best-effort delete of a rejected Action original so it does not sit in S3."""
+    k = original_object_key(key)
+    if not k or not s3_configured():
+        return
+    try:
+        _s3_client().delete_object(Bucket=get_settings().s3_bucket, Key=k)
+    except Exception:
+        log.warning("delete_original failed for %s", k, exc_info=True)
 
 
 def archive_original(key: str) -> str | None:

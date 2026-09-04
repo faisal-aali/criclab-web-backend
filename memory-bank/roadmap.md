@@ -33,9 +33,11 @@ High-level features. Detail lives in `tasks/`.
 | FEAT-031 | **Daily video quota** | Done | 60 starts/UTC day; FIFO overflow; `expected_start_at`; analysis notify |
 | FEAT-032 | **Glacier originals** | Done | Archive `original/` to Glacier Flexible Retrieval when the job is finished for good |
 | FEAT-033 | **Honor in-flight cancel** | Done | Cancel stays `cancelled`; worker stops at next stage; quota slot stays used |
+| FEAT-034 | **Action clip gates** | Done | `POST /videos` mp4/mov + 100 MiB; fps/duration/1080p on the worker |
 
 ## Change log
 
+- **4 Sep 2026 (FEAT-034):** Action `POST /videos` allows only `.mp4`/`.mov` and ≤100 MiB. fps/1080p/10 s stay on the worker. Ball flight suffixes unchanged.
 - Initial greenfield build under `CricLabMLReview` with working upload → analysis → PDF path
 - Replaced Notera Memory Bank with Cric-Lab product context
 - **SpinLab-parity rebuild:** switched the measurement engine from ball tracking

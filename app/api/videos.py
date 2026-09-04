@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 from typing import Any
@@ -11,14 +10,12 @@ from fastapi.responses import FileResponse
 from app.api.deps import CurrentUser, VerifiedUser, visible_to
 from app.config import get_settings
 from app.db import repository as repo
-from app.pipeline import quota
+from app.pipeline import clip_spec, quota
 from app.pipeline.eta import estimate_eta_seconds
 from app.pipeline.profile import parse_player_profile
 from app.services import original_archive, s3_service
 
 router = APIRouter(tags=["analysis"])
-
-_VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 
 
 @router.get("/videos/upload-params")
@@ -68,23 +65,60 @@ async def _store_incoming_video(
     key = _incoming_source_key(source_key, source_url)
     if key:
         _reject_archived_original(key)
-        suffix = Path(key).suffix.lower() or ".mp4"
-        if suffix not in _VIDEO_SUFFIXES:
-            suffix = ".mp4"
+        _assert_action_suffix(key)
+        if original_name:
+            _assert_action_suffix(original_name)
+        _assert_action_object_size(key)
+        suffix = Path(key).suffix.lower()
         dest = dest.with_suffix(suffix)
         name = original_name or Path(key).name or dest.name
         return dest, name, key
 
     if not file or not file.filename:
         raise HTTPException(400, "Attach a video or a source_key")
-    suffix = Path(file.filename).suffix.lower() or ".mp4"
-    if suffix not in _VIDEO_SUFFIXES:
-        raise HTTPException(400, "Unsupported video type")
+    _assert_action_suffix(file.filename)
+    suffix = Path(file.filename).suffix.lower()
     dest = dest.with_suffix(suffix)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    oversized = False
     with dest.open("wb") as out:
-        shutil.copyfileobj(file.file, out)
+        while True:
+            chunk = file.file.read(256 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > clip_spec.MAX_BYTES:
+                oversized = True
+                break
+            out.write(chunk)
+    if oversized:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, clip_spec.MSG_SIZE)
+    if written < clip_spec.MIN_BYTES:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, clip_spec.MSG_EMPTY)
     return dest, file.filename, None
+
+
+def _assert_action_suffix(name: str) -> None:
+    if not clip_spec.suffix_ok(name):
+        raise HTTPException(400, clip_spec.MSG_EXTENSION)
+
+
+def _assert_action_object_size(key: str) -> None:
+    if not s3_service.s3_configured():
+        return
+    head = s3_service.head_original(key)
+    if head is None:
+        raise HTTPException(400, "Video key is not from our upload host")
+    size = int(head.get("content_length") or 0)
+    if size < clip_spec.MIN_BYTES:
+        s3_service.delete_original(key)
+        raise HTTPException(400, clip_spec.MSG_EMPTY)
+    if size > clip_spec.MAX_BYTES:
+        s3_service.delete_original(key)
+        raise HTTPException(400, clip_spec.MSG_SIZE)
 
 
 def _reject_archived_original(key: str) -> None:

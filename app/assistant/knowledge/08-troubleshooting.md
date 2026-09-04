@@ -11,7 +11,7 @@ Almost always the camera angle or the light.
 - A busy background — netting, spectators, a bright sky right behind the ball —
   makes the ball hard to separate. Shift your angle a few metres.
 - A low frame rate on a fast bowler leaves too few frames of the ball in flight.
-  Use 60fps or higher.
+  Use 120 or 240 fps slow-mo.
 
 ## "The speed looks too low"
 
@@ -19,7 +19,8 @@ Check the clip is filmed side-on. A ball travelling towards or away from the
 camera reads slower than it is. CricLab corrects for this as far as the footage
 allows, but it cannot recover what was never visible.
 
-Slow motion is not the cause — CricLab works out the real capture rate itself.
+Slow motion tagged 120 or 240 fps is required for Action. A 30 fps export of a
+slow-mo clip is rejected on upload.
 
 ## "Release looks like it happened at the wrong moment"
 
@@ -29,10 +30,10 @@ things.
 
 ## "My clip will not upload"
 
-- Keep it under about thirty seconds.
-- MP4 and MOV are the safest formats.
+- Keep it under 10 seconds and 100 MB. Landscape 1080p, tagged 120 or 240 fps.
+- MP4 and MOV only for Action.
 - On a weak connection, wait for wifi — a large 4K file is a lot to push over
-  mobile data.
+  mobile data, and 4K slow-mo often exceeds 100 MB.
 
 ## "Processing is taking a long time"
 

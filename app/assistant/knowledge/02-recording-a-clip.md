@@ -3,6 +3,17 @@
 Most disappointing results come down to the filming, not the bowling. Five
 minutes of setup makes the difference.
 
+Action uploads are gated. The file must be:
+
+- **MP4 or MOV** (not WebM, AVI or MKV)
+- **Landscape 1080p or higher** (short side at least 1080 pixels)
+- **Tagged 120 or 240 fps** slow-mo in the file itself — not 30, 60, 480 or 960
+- **One delivery, 10 seconds or less**
+- **Under 100 MB**
+
+Do not re-export a slow-mo clip as 30 fps or “Most Compatible”. Those files are
+rejected even if the delivery was filmed at 120 fps.
+
 ## Where to stand
 
 Film **side-on**: stand square to the pitch, level with the popping crease, far
@@ -16,12 +27,10 @@ numbers.
 
 ## Camera settings
 
-- **Frame rate**: 60fps or higher. 120fps or 240fps is better. The faster the
-  bowler, the more frames you want.
-- **Slow motion is fine.** If your phone records slow motion, use it — CricLab
-  works out the real capture rate for itself and reports true speeds, not
-  slowed-down ones.
-- **Resolution**: 1080p is plenty. 4K works too.
+- **Frame rate**: 120 fps or 240 fps slow-mo, tagged in the file. 30 and 60 fps
+  are rejected. 480 and 960 fps are also rejected.
+- **Resolution**: 1080p minimum. 4K works if the file stays under 100 MB; if it
+  does not, shoot 1080p 120/240 instead.
 - **Hold the phone steady**, ideally on a tripod or propped against something.
   A wobbling camera costs accuracy.
 - **Landscape**, not portrait.
@@ -29,7 +38,7 @@ numbers.
 ## Light and background
 
 - Daylight or good floodlights. In poor light the shutter stays open longer and
-  the ball smears into a streak.
+  the ball smears into a streak. Add light rather than dropping to 30 fps.
 - A plain background behind the ball's path helps. Busy netting, moving people
   or a bright sky directly behind the ball make it harder to follow.
 - A white ball against a white sightscreen, or a red ball against dark netting,
@@ -42,5 +51,5 @@ until after the ball has bounced. One delivery per clip.
 
 ## Length and size
 
-Keep clips under about thirty seconds. Longer files take longer to process and
-rarely add anything.
+Keep clips at **10 seconds or less** and **under 100 MB**. Longer or heavier
+files are rejected before analysis.

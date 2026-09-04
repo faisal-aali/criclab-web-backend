@@ -36,6 +36,15 @@ Same relative filenames (`agent/ollama_agent.py`, `balltrack/stumps.py`) are all
 
 Wrong camera on Action still shows **—** for km/h. Never paste stump speed onto a pose job as a fake headline.
 
+## Action clip gates (upload)
+
+Action `POST /videos` only: `.mp4`/`.mov`, ≤100 MiB (`head_object` / multipart cap).
+Tagged **120 or 240 fps** (±3), landscape 1080p, ≤10 s are enforced on the **video
+worker** after download (`clip_spec.py`). Do not put a 100 MB cap on
+`GET /videos/upload-params` (Ball flight shares it). Numbers KEEP IN SYNC with
+`criclab-web-frontend/src/lib/clipSpec.ts` and
+`criclab-video-service/app/pipeline/clip_spec.py`.
+
 ## Architecture rule #2 — pose is the measurement engine; ball speed needs a real lock
 
 Pose (MediaPipe) drives release, FFC, joint angles, stride, arm-swing. **Ball
