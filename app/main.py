@@ -23,12 +23,14 @@ from app.coaching.coaches_seed import seed_coaches
 from app.config import get_settings
 from app.db.indexes import ensure_indexes
 from app.db.mongo import close_mongo, ping_mongo
+from app.logging_config import configure_logging
 from app.pipeline import quota
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings = get_settings()
+    configure_logging(is_production=settings.is_production)
     for sub in ("videos", "artifacts", "frames", "balltrack"):
         (settings.storage_path / sub).mkdir(parents=True, exist_ok=True)
     # Idempotent; also the only place uniqueness and TTL rules are declared.

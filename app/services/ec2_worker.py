@@ -19,6 +19,7 @@ def schedule_wake_worker() -> None:
     """Start the worker EC2 if it is stopped. No-op locally and when already up."""
     settings = get_settings()
     if not settings.is_production or not (settings.worker_ec2_instance_id or "").strip():
+        log.debug("worker wake skipped APP_ENV=%s", settings.app_env)
         return
     try:
         loop = asyncio.get_running_loop()
@@ -33,6 +34,7 @@ def maybe_wake_worker() -> None:
     """Start the worker only when a clip can actually begin now."""
     settings = get_settings()
     if not settings.is_production or not (settings.worker_ec2_instance_id or "").strip():
+        log.debug("worker wake skipped APP_ENV=%s", settings.app_env)
         return
     try:
         loop = asyncio.get_running_loop()

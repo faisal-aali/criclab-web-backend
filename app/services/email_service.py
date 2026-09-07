@@ -156,6 +156,10 @@ def _mask(address: str) -> str:
     return f"{name[:1]}***@{domain}"
 
 
+def mask_email(address: str) -> str:
+    return _mask(address)
+
+
 def _strip_tags(html: str) -> str:
     import re
 

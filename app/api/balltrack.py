@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from app.pipeline import quota
 from app.pipeline.eta import estimate_eta_seconds
 from app.services import original_archive, s3_service
 
+log = logging.getLogger("criclab.balltrack")
 router = APIRouter(prefix="/balltrack", tags=["balltrack"])
 
 _VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
@@ -115,10 +117,12 @@ async def create_session(
     try:
         cal = json.loads(calibration)
     except json.JSONDecodeError as exc:
+        log.debug("POST /sessions reject calibration not JSON")
         raise HTTPException(400, "calibration must be JSON") from exc
     if pitch_length_m:
         cal["pitch_length_m"] = pitch_length_m
     if "bowler" not in cal or "batter" not in cal:
+        log.debug("POST /sessions reject missing stump boxes")
         raise HTTPException(400, "calibration needs bowler and batter boxes")
 
     settings = get_settings()
@@ -146,6 +150,14 @@ async def create_session(
         with dest.open("wb") as out:
             shutil.copyfileobj(file.file, out)
         stored_name = file.filename
+    log.debug(
+        "POST /sessions ingest user_id=%s session_id=%s job_id=%s source_key=%s pitch_m=%s",
+        user["_id"],
+        session_id,
+        job_id,
+        incoming_key,
+        cal.get("pitch_length_m"),
+    )
 
     now = repo.utcnow()
     await repo.insert_session(
@@ -180,6 +192,14 @@ async def create_session(
         }
     )
     await quota.schedule_queued_jobs(notify_inserted_id=job_id)
+    log.debug(
+        "POST /sessions user_id=%s session_id=%s job_id=%s source_key=%s cal=%s status=queued",
+        user["_id"],
+        session_id,
+        job_id,
+        incoming_key,
+        bool(cal.get("bowler") and cal.get("batter")),
+    )
     return {"session_id": session_id, "job_id": job_id, "status": "queued"}
 
 

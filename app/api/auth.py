@@ -137,6 +137,11 @@ async def _send_verification(user: dict[str, Any], tasks: BackgroundTasks) -> No
         code,
         auth_repo.OTP_TTL_MINUTES,
     )
+    log.debug(
+        "verification email queued user_id=%s email_configured=%s",
+        user["_id"],
+        get_settings().email_configured,
+    )
 
 
 def _describe_device(user_agent: str) -> str:
@@ -162,6 +167,11 @@ async def sign_up(body: SignUpIn, tasks: BackgroundTasks, client: Client):
     )
     _reject_weak_password(body.password)
 
+    log.debug(
+        "signup start ip=%s email=%s",
+        client.ip,
+        email_service.mask_email(str(body.email)),
+    )
     user = await auth_repo.create_user(
         email=body.email, name=body.name, password_hash=hash_password(body.password)
     )
@@ -170,6 +180,12 @@ async def sign_up(body: SignUpIn, tasks: BackgroundTasks, client: Client):
         # so a real owner is told and a prober learns nothing.
         existing = await auth_repo.get_user_by_email(body.email)
         if existing:
+            log.debug(
+                "signup duplicate email user_id=%s verified=%s resend=%s",
+                existing["_id"],
+                bool(existing.get("email_verified")),
+                not existing.get("email_verified"),
+            )
             await auth_repo.log_security_event(
                 user_id=existing["_id"], event="signup_existing_email",
                 ip=client.ip, user_agent=client.user_agent,
@@ -186,6 +202,7 @@ async def sign_up(body: SignUpIn, tasks: BackgroundTasks, client: Client):
     await auth_repo.log_security_event(
         user_id=user["_id"], event="signup", ip=client.ip, user_agent=client.user_agent
     )
+    log.debug("signup created user_id=%s event=signup", user["_id"])
     return {
         "status": "pending_verification",
         "message": "Check your email for a 6-digit code to confirm your account.",
@@ -201,14 +218,18 @@ async def verify_email(body: OtpIn, tasks: BackgroundTasks, client: Client):
     )
     user = await auth_repo.get_user_by_email(body.email)
     if not user:
+        log.debug("verify-email unknown email=%s ip=%s", email_service.mask_email(str(body.email)), client.ip)
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "That code has expired. Request a new one.")
     if user.get("email_verified"):
+        log.debug("verify-email already_verified user_id=%s", user["_id"])
         return {"status": "already_verified", **await _issue_tokens(user, client)}
 
+    log.debug("verify-email attempt user_id=%s ip=%s", user["_id"], client.ip)
     ok, reason = await auth_repo.consume_otp(
         user_id=user["_id"], purpose=auth_repo.OTP_VERIFY_EMAIL, code_digest=digest(body.code)
     )
     if not ok:
+        log.debug("verify-email failed user_id=%s reason=%s", user["_id"], reason)
         await auth_repo.log_security_event(
             user_id=user["_id"], event="verify_failed", ip=client.ip, user_agent=client.user_agent
         )
@@ -226,6 +247,7 @@ async def verify_email(body: OtpIn, tasks: BackgroundTasks, client: Client):
         body="Your account is fully set up. Film a delivery to get your first analysis.",
         link="/app/action",
     )
+    log.debug("verify-email ok user_id=%s", user["_id"])
     return {"status": "verified", **await _issue_tokens(user, client)}
 
 
@@ -245,12 +267,14 @@ async def resend_otp(
     user = await auth_repo.get_user_by_email(body.email)
     generic = {"status": "sent", "message": "If that account exists, a new code is on its way."}
     if not user:
+        log.debug("resend-otp unknown email=%s purpose=%s", email_service.mask_email(str(body.email)), purpose)
         return generic
 
     # Cheap flood guard on top of the window limit: refuse a second code within
     # 45 seconds even if the window allows it.
     age = await auth_repo.recent_otp_age_seconds(user["_id"], purpose)
     if age is not None and age < 45:
+        log.debug("resend-otp throttled user_id=%s age_s=%.1f", user["_id"], age)
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
             f"A code was sent moments ago. Try again in {int(45 - age)} seconds.",
@@ -266,6 +290,12 @@ async def resend_otp(
         tasks.add_task(email_service.send_verification_otp, user["email"], name, code, auth_repo.OTP_TTL_MINUTES)
     else:
         tasks.add_task(email_service.send_password_reset_otp, user["email"], name, code, auth_repo.OTP_TTL_MINUTES)
+    log.debug(
+        "resend-otp queued user_id=%s purpose=%s email_configured=%s",
+        user["_id"],
+        purpose,
+        get_settings().email_configured,
+    )
     return generic
 
 

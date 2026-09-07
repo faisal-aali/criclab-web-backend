@@ -81,8 +81,15 @@ async def create_user(
     }
     try:
         await get_db().users.insert_one(doc)
+        log.debug(
+            "create_user ok user_id=%s role=%s verified=%s",
+            doc["_id"],
+            doc["role"],
+            doc["email_verified"],
+        )
         return doc
     except DuplicateKeyError:
+        log.debug("create_user duplicate email")
         return None
 
 
@@ -221,6 +228,12 @@ async def create_otp(
         "consumed_at": None,
     }
     await get_db().otps.insert_one(doc)
+    log.debug(
+        "otp stored user_id=%s purpose=%s ttl_min=%s",
+        user_id,
+        purpose,
+        minutes,
+    )
     return doc
 
 

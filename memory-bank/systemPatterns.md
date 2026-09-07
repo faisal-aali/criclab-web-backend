@@ -517,6 +517,28 @@ on the video/session. Archive failures must not fail the job. Reusing a Glacier
 Progress writes (`update_job`) only apply while status is `claimed|processing|analyzing`
 so they cannot flip `cancelled` back to `processing`.
 
+## Logging
+
+- **Stdlib `logging` only — no structlog, no loguru, no extra env vars.**
+  `app/logging_config.py::configure_logging(is_production=...)` is called once in
+  the FastAPI lifespan (`app/main.py`); it sets `basicConfig` with
+  `"%(asctime)s %(levelname)s %(name)s  %(message)s"`, `force=True`, and pins the
+  noisy libs (`boto3`, `botocore`, `urllib3`, `pymongo`, `s3transfer`,
+  `matplotlib`, `PIL`) to WARNING — add new loud third-party loggers to
+  `_NOISY` there, not with ad-hoc `setLevel` calls elsewhere. Level is
+  DEBUG locally and WARNING in production (`APP_ENV`), nothing else configures it.
+- **Every module gets a named logger under the `criclab` namespace:**
+  `log = logging.getLogger("criclab.<module>")` at module top (e.g.
+  `criclab.videos`, `criclab.auth`). `configure_logging` sets the level on the
+  `criclab` parent logger, so any `criclab.*` child inherits it — use that
+  namespace or your logs will be silently filtered in production.
+- **Use lazy `%s` args, not f-strings**: `log.info("job %s claimed", job_id)`.
+- **Never log secrets, tokens, or PII** (passwords, JWTs, email bodies). Security
+  events a user/admin can see go to `auth_repo.log_security_event` (the Mongo
+  audit trail), not to the logger — the two are not interchangeable.
+- **Do not call `logging.basicConfig` or `configure_logging` anywhere else** —
+  one call per process, in the lifespan.
+
 ## Anti-patterns (do not introduce)
 
 - Using the LLM as the motion engine or to invent km/h / YouTube IDs

@@ -334,6 +334,23 @@ async def schedule_queued_jobs(*, notify_inserted_id: str | None = None) -> list
                 await _notify_insert(a, today)
             elif a.previous_scheduled_date and a.previous_scheduled_date != a.scheduled_date:
                 await _notify_date_change(a)
+        log.debug(
+            "schedule_queued_jobs notify=%s queued=%s assigned=%s today=%s",
+            notify_inserted_id,
+            len(queued),
+            len(assignments),
+            today,
+        )
+        if notify_inserted_id:
+            match = next((a for a in assignments if a.id == notify_inserted_id), None)
+            if match:
+                log.debug(
+                    "schedule job_id=%s kind=%s date=%s available_at=%s",
+                    match.id,
+                    match.kind,
+                    match.scheduled_date,
+                    match.available_at,
+                )
         return assignments
     except Exception:
         log.exception("quota schedule failed")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from typing import Any
@@ -15,6 +16,7 @@ from app.pipeline.eta import estimate_eta_seconds
 from app.pipeline.profile import parse_player_profile
 from app.services import original_archive, s3_service
 
+log = logging.getLogger("criclab.videos")
 router = APIRouter(tags=["analysis"])
 
 
@@ -26,11 +28,14 @@ async def video_upload_params(
 ):
     """S3 presigned PUT so the browser can upload the clip off this API."""
     if not s3_service.s3_configured():
+        log.debug("upload-params user_id=%s s3=False", user["_id"])
         return {"configured": False}
     key = s3_service.original_key(user["_id"], filename)
     params = s3_service.presigned_put(key, content_type)
     if not params:
+        log.debug("upload-params user_id=%s s3=True key=%s presign=False", user["_id"], key)
         return {"configured": False}
+    log.debug("upload-params user_id=%s s3=True key=%s", user["_id"], key)
     return {"configured": True, **params}
 
 
@@ -38,6 +43,7 @@ def _incoming_source_key(source_key: str | None, source_url: str | None) -> str 
     if (source_key or "").strip():
         key = s3_service.incoming_original_key(source_key)
         if not key:
+            log.debug("reject source_key not from our host")
             raise HTTPException(400, "Video key is not from our upload host")
         return key
     url = (source_url or "").strip()
@@ -45,6 +51,7 @@ def _incoming_source_key(source_key: str | None, source_url: str | None) -> str 
         return None
     key = s3_service.incoming_original_key(url)
     if not key:
+        log.debug("reject source_url not from our host")
         raise HTTPException(400, "Video URL is not from our upload host")
     return key
 
@@ -72,6 +79,7 @@ async def _store_incoming_video(
         suffix = Path(key).suffix.lower()
         dest = dest.with_suffix(suffix)
         name = original_name or Path(key).name or dest.name
+        log.debug("store incoming s3 key=%s suffix=%s", key, suffix)
         return dest, name, key
 
     if not file or not file.filename:
@@ -94,15 +102,19 @@ async def _store_incoming_video(
             out.write(chunk)
     if oversized:
         dest.unlink(missing_ok=True)
+        log.debug("POST /videos reject oversized local bytes=%s", written)
         raise HTTPException(400, clip_spec.MSG_SIZE)
     if written < clip_spec.MIN_BYTES:
         dest.unlink(missing_ok=True)
+        log.debug("POST /videos reject empty local bytes=%s", written)
         raise HTTPException(400, clip_spec.MSG_EMPTY)
+    log.debug("store incoming local file=%s bytes=%s", file.filename, written)
     return dest, file.filename, None
 
 
 def _assert_action_suffix(name: str) -> None:
     if not clip_spec.suffix_ok(name):
+        log.debug("POST /videos reject suffix name=%s", name)
         raise HTTPException(400, clip_spec.MSG_EXTENSION)
 
 
@@ -113,11 +125,14 @@ def _assert_action_object_size(key: str) -> None:
     if head is None:
         raise HTTPException(400, "Video key is not from our upload host")
     size = int(head.get("content_length") or 0)
+    log.debug("s3 head key=%s size=%s class=%s", key, size, head.get("storage_class"))
     if size < clip_spec.MIN_BYTES:
         s3_service.delete_original(key)
+        log.debug("POST /videos reject empty s3 key=%s size=%s", key, size)
         raise HTTPException(400, clip_spec.MSG_EMPTY)
     if size > clip_spec.MAX_BYTES:
         s3_service.delete_original(key)
+        log.debug("POST /videos reject oversized s3 key=%s size=%s", key, size)
         raise HTTPException(400, clip_spec.MSG_SIZE)
 
 
@@ -127,6 +142,7 @@ def _reject_archived_original(key: str) -> None:
         return
     head = s3_service.head_original(key)
     if head and s3_service.is_archived_storage_class(head.get("storage_class")):
+        log.debug("POST /videos reject archived key=%s", key)
         raise HTTPException(400, "Upload the clip again")
 
 
@@ -170,12 +186,29 @@ async def upload_video(
 
     video_id = repo.new_id("vid")
     job_id = repo.new_id("job")
+    log.debug(
+        "POST /videos start user_id=%s video_id=%s job_id=%s arm=%s style=%s height_m=%s mpp=%s",
+        user["_id"],
+        video_id,
+        job_id,
+        profile.get("bowling_arm"),
+        profile.get("bowling_style"),
+        profile.get("height_m"),
+        profile.get("meters_per_pixel"),
+    )
     dest, stored_name, incoming_key = await _store_incoming_video(
         dest=videos_dir / video_id,
         file=file,
         source_key=source_key,
         source_url=source_url,
         original_name=original_name,
+    )
+    log.debug(
+        "POST /videos user_id=%s video_id=%s source_key=%s local=%s",
+        user["_id"],
+        video_id,
+        incoming_key,
+        None if incoming_key else stored_name,
     )
 
     video_doc = {
@@ -195,6 +228,7 @@ async def upload_video(
         "created_at": repo.utcnow(),
     }
     await repo.insert_video(video_doc)
+    log.debug("video inserted video_id=%s", video_id)
 
     job_doc = {
         "_id": job_id,
@@ -209,8 +243,10 @@ async def upload_video(
         "updated_at": repo.utcnow(),
     }
     await repo.insert_job(job_doc)
+    log.debug("job inserted job_id=%s video_id=%s status=queued", job_id, video_id)
     # criclab-video-service workers claim queued jobs. This API does not run CV.
     await quota.schedule_queued_jobs(notify_inserted_id=job_id)
+    log.debug("job queued job_id=%s kind=action status=queued", job_id)
 
     return {"video_id": video_id, "job_id": job_id, "status": "queued"}
 
@@ -257,6 +293,7 @@ async def cancel_job(job_id: str, user: CurrentUser):
         raise HTTPException(409, "This clip has already finished")
     if prior == "queued":
         await original_archive.maybe_archive_for_job(updated)
+    log.debug("job cancel job_id=%s prior=%s status=%s", job_id, prior, updated.get("status"))
     return {"id": updated["_id"], "status": updated.get("status")}
 
 
