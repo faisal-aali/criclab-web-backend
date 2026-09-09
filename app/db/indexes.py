@@ -90,6 +90,9 @@ INDEXES: dict[str, list[IndexModel]] = {
         IndexModel([("user_id", ASCENDING), ("created_at", DESCENDING)], name="user_recent"),
         IndexModel([("created_at", DESCENDING)], name="created_desc"),
     ],
+    "training_plans": [
+        IndexModel([("user_id", ASCENDING)], unique=True, name="uniq_user_plan"),
+    ],
     "videos": [
         IndexModel([("source_key", ASCENDING)], name="by_source_key"),
         IndexModel([("user_id", ASCENDING), ("created_at", DESCENDING)], name="user_recent"),

@@ -16,6 +16,7 @@ from app.api import (
     health,
     notifications,
     support,
+    training,
     videos,
 )
 from app.assistant.rag import build_index
@@ -114,6 +115,7 @@ app.include_router(balltrack.router)
 app.include_router(coaching.router)
 app.include_router(bookings.router)
 app.include_router(support.router)
+app.include_router(training.router)
 app.include_router(assistant.router)
 app.include_router(admin.router)
 

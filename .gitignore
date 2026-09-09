@@ -2,11 +2,11 @@
 .venv312/
 __pycache__/
 *.pyc
-.env
 .DS_Store
 storage/
 *.mp4
 *.mov
 .Python
 .vercel
-.env*
+config.bat
+node_modules
