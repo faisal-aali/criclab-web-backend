@@ -128,6 +128,18 @@ cd ../criclab-video-service && python -m app.worker
 ollama list   # expect gemma3:4b, nomic-embed-text
 ```
 
+## Tests
+
+```bash
+cd criclab-web-backend && source .venv312/bin/activate
+python -m unittest discover -s tests -p "test_*.py"   # unittest only — no pytest
+```
+
+`requirements.txt` lists `cryptography` (CloudFront signing); a venv built
+before it was added is missing it and `tests/test_storage.py` cannot import.
+CI (`.github/workflows/ci.yml`) installs requirements, compiles, and runs this
+suite on Python 3.12 before the self-hosted deploy job.
+
 ## Environment (storage)
 
 | Variable | Purpose |
