@@ -83,6 +83,17 @@ class ProfileIn(BaseModel):
     profile: dict[str, Any] | None = None
 
 
+class ResendIn(EmailIn):
+    """`{email, purpose}` as one flat object — what both clients send.
+
+    Declaring `purpose` as a separate `Body(embed=True)` parameter next to a
+    model made FastAPI expect `{"body": {...}, "purpose": ...}`, so every
+    "resend code" tap returned 422 on the web app and the phone alike.
+    """
+
+    purpose: str = auth_repo.OTP_VERIFY_EMAIL
+
+
 class RefreshIn(BaseModel):
     refresh_token: str = Field(min_length=10, max_length=400)
 
@@ -253,11 +264,11 @@ async def verify_email(body: OtpIn, tasks: BackgroundTasks, client: Client):
 
 @router.post("/resend-otp")
 async def resend_otp(
-    body: EmailIn,
+    body: ResendIn,
     tasks: BackgroundTasks,
     client: Client,
-    purpose: Annotated[str, Body(embed=True)] = auth_repo.OTP_VERIFY_EMAIL,
 ):
+    purpose = body.purpose
     if purpose not in (auth_repo.OTP_VERIFY_EMAIL, auth_repo.OTP_RESET_PASSWORD):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unknown request")
     await enforce_rate_limit(

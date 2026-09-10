@@ -141,7 +141,15 @@ async def optional_user(
         payload = decode_access_token(authorization.split(" ", 1)[1].strip())
     except TokenError:
         return None
-    return await auth_repo.get_user(payload["sub"])
+    user = await auth_repo.get_user(payload["sub"])
+    # Same acceptance rules as `current_user`, minus the 401: a disabled
+    # account or a token minted before the last password change is treated
+    # as anonymous rather than as a signed-in caller.
+    if not user or user.get("disabled"):
+        return None
+    if int(payload.get("pwd_at") or 0) != password_marker(user):
+        return None
+    return user
 
 
 OptionalUser = Annotated[dict[str, Any] | None, Depends(optional_user)]

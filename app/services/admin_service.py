@@ -65,7 +65,9 @@ async def dashboard_summary(start: datetime, end: datetime) -> dict[str, Any]:
     users_unverified = await db.users.count_documents({"email_verified": {"$ne": True}})
     users_inactive = max(0, users_total - users_active - users_disabled)
 
-    processing_statuses = ["queued", "processing", "analyzing"]
+    # `claimed` is the first status the worker writes; leaving it out made a
+    # clip vanish from "processing" for the seconds between claim and ingest.
+    processing_statuses = ["queued", "claimed", "processing", "analyzing"]
 
     def video_counts(collection: str) -> dict[str, Any]:
         col = db[collection]
@@ -227,7 +229,7 @@ async def _recent_throws(limit: int = 12) -> list[dict[str, Any]]:
 
 async def _in_progress(limit: int = 8) -> list[dict[str, Any]]:
     db = get_db()
-    live = {"status": {"$in": ["queued", "processing", "analyzing"]}}
+    live = {"status": {"$in": ["queued", "claimed", "processing", "analyzing"]}}
     jobs = await db.jobs.find(live).sort("updated_at", -1).limit(limit).to_list(limit)
     ball = await db.balltrack_jobs.find(live).sort("updated_at", -1).limit(limit).to_list(limit)
     rows = []
@@ -508,8 +510,12 @@ async def list_analyses(
     )
 
     rows: list[dict[str, Any]] = []
+    total = 0
     for collection in collections:
         tag = "action" if collection == "jobs" else "ball_flight"
+        # The page is cut from a merged, over-fetched window, but the total
+        # must be the real count or the pager stops one page early.
+        total += await get_db()[collection].count_documents(query)
         cursor = get_db()[collection].find(query).sort("created_at", -1).limit(page * page_size + page_size)
         async for doc in cursor:
             rows.append(
@@ -528,7 +534,6 @@ async def list_analyses(
             )
 
     rows.sort(key=lambda r: r["created_at"] or now_floor(), reverse=True)
-    total = len(rows)
     start = max(0, (page - 1) * page_size)
     page_rows = rows[start : start + page_size]
 

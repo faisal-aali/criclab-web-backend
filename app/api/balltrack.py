@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from app.api.deps import CurrentUser, VerifiedUser, visible_to
@@ -21,16 +20,28 @@ log = logging.getLogger("criclab.balltrack")
 router = APIRouter(prefix="/balltrack", tags=["balltrack"])
 
 _VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+# Same ceiling the video worker applies when it downloads a ball-flight clip
+# (`s3_service.MAX_BYTES` there). Rejecting here means a too-large clip fails
+# at upload with a sentence, not minutes later as a failed job.
+MAX_BALLFLIGHT_BYTES = 180 * 1000 * 1000
+MAX_STILL_BYTES = 15 * 1024 * 1024
+MSG_BALLFLIGHT_SIZE = "That clip is over 180 MB. Trim it to the delivery and try again."
+# Fields of a stored artifacts document that the browser is meant to see. The
+# raw document also holds worker filesystem paths and S3 object keys.
+_PUBLIC_SESSION_ARTIFACTS = ("job_id",)
 
 
 @router.post("/detect-stumps")
 async def detect_stumps(
+    user: CurrentUser,
     file: UploadFile = File(...),
     hints: str | None = Form(None),
 ):
-    raw = await file.read()
+    raw = await file.read(MAX_STILL_BYTES + 1)
     if not raw:
         raise HTTPException(400, "Empty image")
+    if len(raw) > MAX_STILL_BYTES:
+        raise HTTPException(400, "That photo is too large — use a still under 15 MB")
     import cv2
     import numpy as np
 
@@ -70,7 +81,7 @@ def _public_session(doc: dict, deliveries: list[dict] | None = None) -> dict:
         "created_at": doc.get("created_at"),
         "delivery_count": doc.get("delivery_count") or len(doc.get("delivery_ids") or []),
         "artifacts": {
-            **art,
+            **{k: art.get(k) for k in _PUBLIC_SESSION_ARTIFACTS if art.get(k) is not None},
             "overlay_url": overlay,
             "pitch_map_url": pitch,
             "cloudinary_overlay_url": overlay,
@@ -96,7 +107,6 @@ def _public_delivery(d: dict) -> dict:
         "metrics": d.get("metrics"),
         "bounce": d.get("bounce"),
         "artifacts": {
-            **art,
             "clip_url": clip,
             "cloudinary_clip_url": clip,
         },
@@ -135,6 +145,7 @@ async def create_session(
     incoming_key = _incoming_source_key(source_key, source_url)
     if incoming_key:
         _reject_archived_original(incoming_key)
+        _assert_ballflight_object_size(incoming_key)
         suffix = Path(incoming_key).suffix.lower() or ".mp4"
         if suffix not in _VIDEO_SUFFIXES:
             suffix = ".mp4"
@@ -147,8 +158,23 @@ async def create_session(
         if suffix not in _VIDEO_SUFFIXES:
             raise HTTPException(400, "Unsupported video type")
         dest = dest.with_suffix(suffix)
+        written = 0
         with dest.open("wb") as out:
-            shutil.copyfileobj(file.file, out)
+            while True:
+                chunk = file.file.read(256 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_BALLFLIGHT_BYTES:
+                    break
+                out.write(chunk)
+        if written > MAX_BALLFLIGHT_BYTES:
+            dest.unlink(missing_ok=True)
+            log.debug("POST /sessions reject oversized local bytes=%s", written)
+            raise HTTPException(400, MSG_BALLFLIGHT_SIZE)
+        if written == 0:
+            dest.unlink(missing_ok=True)
+            raise HTTPException(400, "That clip is empty")
         stored_name = file.filename
     log.debug(
         "POST /sessions ingest user_id=%s session_id=%s job_id=%s source_key=%s pitch_m=%s",
@@ -203,8 +229,24 @@ async def create_session(
     return {"session_id": session_id, "job_id": job_id, "status": "queued"}
 
 
+def _assert_ballflight_object_size(key: str) -> None:
+    if not s3_service.s3_configured():
+        return
+    head = s3_service.head_original(key)
+    if head is None:
+        raise HTTPException(400, "Video key is not from our upload host")
+    size = int(head.get("content_length") or 0)
+    if size == 0:
+        s3_service.delete_original(key)
+        raise HTTPException(400, "That clip is empty")
+    if size > MAX_BALLFLIGHT_BYTES:
+        s3_service.delete_original(key)
+        log.debug("POST /sessions reject oversized s3 key=%s size=%s", key, size)
+        raise HTTPException(400, MSG_BALLFLIGHT_SIZE)
+
+
 @router.get("/sessions")
-async def list_sessions(user: CurrentUser, limit: int = 50):
+async def list_sessions(user: CurrentUser, limit: int = Query(50, ge=1, le=200)):
     items = await repo.list_sessions(limit=limit, user_id=user["_id"])
     return {"items": [_public_session(s) for s in items]}
 

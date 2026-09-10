@@ -5,7 +5,7 @@ from pathlib import Path
 
 from typing import Any
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from app.api.deps import CurrentUser, VerifiedUser, visible_to
@@ -405,7 +405,7 @@ async def leaderboard(user: CurrentUser, limit: int = 20):
 
 
 @router.get("/deliveries")
-async def list_deliveries(user: CurrentUser, limit: int = 50):
+async def list_deliveries(user: CurrentUser, limit: int = Query(50, ge=1, le=200)):
     items = await repo.list_deliveries(limit=limit, user_id=user["_id"])
     out = []
     for d in items:

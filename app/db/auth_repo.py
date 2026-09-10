@@ -282,18 +282,36 @@ async def hit_rate_limit(key: str, *, limit: int, window_seconds: int) -> tuple[
     """
     db = get_db()
     now = datetime.now(timezone.utc)
-    doc = await db.rate_limits.find_one({"key": key})
-    if not doc or _aware(doc["expires_at"]) <= now:
-        await db.rate_limits.update_one(
-            {"key": key},
-            {"$set": {"count": 1, "expires_at": now + timedelta(seconds=window_seconds)}},
-            upsert=True,
-        )
-        return True, limit - 1
-    count = int(doc.get("count", 0)) + 1
+    # One atomic `$inc` on a live window. The previous read-then-write let
+    # concurrent requests all observe the same count and all pass — a burst
+    # of parallel sign-in attempts was exactly the traffic the limit exists
+    # to stop.
+    doc = await db.rate_limits.find_one_and_update(
+        {"key": key, "expires_at": {"$gt": now}},
+        {"$inc": {"count": 1}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if doc is None:
+        # No live window: start one. The unique index on `key` makes two
+        # racing starters collide; the loser simply increments the winner's.
+        try:
+            await db.rate_limits.update_one(
+                {"key": key, "$or": [{"expires_at": {"$lte": now}}, {"expires_at": {"$exists": False}}]},
+                {"$set": {"count": 1, "expires_at": now + timedelta(seconds=window_seconds)}},
+                upsert=True,
+            )
+            return True, limit - 1
+        except DuplicateKeyError:
+            doc = await db.rate_limits.find_one_and_update(
+                {"key": key},
+                {"$inc": {"count": 1}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if doc is None:
+                return True, limit - 1
+    count = int(doc.get("count", 0))
     if count > limit:
         return False, 0
-    await db.rate_limits.update_one({"key": key}, {"$set": {"count": count}})
     return True, limit - count
 
 
