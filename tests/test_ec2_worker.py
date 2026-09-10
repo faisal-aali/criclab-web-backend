@@ -20,6 +20,7 @@ def _settings(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         is_production=production,
+        app_env="production" if production else "local",
         worker_ec2_instance_id=instance_id,
         worker_ec2_region=region,
         aws_access_key_id=key,

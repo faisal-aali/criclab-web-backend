@@ -211,6 +211,31 @@ torso, fence, or a stationary tree is not a ball track: return null + reason.
   caller's identity — read the actual fetch call, don't infer it from which
   page uses it.
 
+## Request contracts the clients actually send (audit, 10 Sep 2026)
+
+- **One flat JSON object per endpoint.** A pydantic model plus a second
+  `Body(embed=True)` parameter makes FastAPI expect `{"body": {...}, "purpose":
+  ...}`; both clients send `{email, purpose}` and got 422 for a full task
+  cycle. Put every field on one model (`ResendIn`) — and check a contract
+  with `TestClient`, not by reading the signature.
+- **`OptionalUser` is `CurrentUser` minus the 401.** Disabled accounts and
+  tokens minted before a password change are anonymous there too.
+- **Rate limits are a single atomic `$inc`.** Read-then-write let a burst of
+  parallel attempts all pass the same count.
+- **Every upload has a byte ceiling on both ingest paths.** Action: 100 MiB
+  (`clip_spec`). Ball flight: 180 MB (`MAX_BALLFLIGHT_BYTES`, the worker's
+  download cap) on multipart *and* `source_key` (S3 `head_object`). Stump
+  stills: 15 MB, signed-in users only.
+- **Responses are allow-lists, not `**doc` spreads.** Stored `artifacts`
+  carry worker filesystem paths and raw object keys; `_public_session` /
+  `_public_delivery` name every field they return.
+- **`claimed` is a live status everywhere** a job is counted as in flight —
+  the worker writes it first, before `processing`.
+- **Query `limit`s are clamped** (`Query(ge=1, le=200)`), never bare ints.
+- **CI runs the suite:** `python -m unittest discover -s tests` on Python 3.12
+  (the declared floor). A test fixture that fakes `Settings` must carry every
+  attribute the code reads (`app_env` included).
+
 ## Admin panel authorization
 
 - **Every admin route depends on `AdminUser`, with no exceptions and no

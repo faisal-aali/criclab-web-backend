@@ -27,13 +27,14 @@ High-level features. Detail lives in `tasks/`.
 | FEAT-020 | **Accounts & auth** | Done | JWT access + rotating refresh, OTP email verification, recovery, guards |
 | FEAT-021 | **Transactional email** | Done | SMTP over aiosmtplib, branded templates, credentials env-only |
 | FEAT-022 | **Notifications** | Done | In-app centre, unread badge, keyset paging |
-| FEAT-023 | Support ticketing | Planned | Collections + indexes ready; no service or UI yet |
-| FEAT-024 | Coaching bookings | Planned | Collections + indexes ready; no service or UI yet |
-| FEAT-025 | RAG assistant | Planned | `kb_chunks` indexed; no retrieval or UI yet |
+| FEAT-023 | Support ticketing | Done (backend); UI hidden `For Future` | Threaded tickets, attachments, staff queue (TASK-011). Web nav hides `/app/support` and `/admin/tickets` |
+| FEAT-024 | Coaching bookings | Done (backend); UI hidden `For Future` | Availability, book/cancel/reschedule (TASK-011). Web nav hides `/app/coaching` and `/admin/coaching` |
+| FEAT-025 | RAG assistant | Done | Grounded retrieval + streaming chat (TASK-011/012); widget mounted on every non-admin route |
 | FEAT-031 | **Daily video quota** | Done | 60 starts/UTC day; FIFO overflow; `expected_start_at`; analysis notify |
 | FEAT-032 | **Glacier originals** | Done | Archive `original/` to Glacier Flexible Retrieval when the job is finished for good |
 | FEAT-033 | **Honor in-flight cancel** | Done | Cancel stays `cancelled`; worker stops at next stage; quota slot stays used |
 | FEAT-034 | **Action clip gates** | Done | `POST /videos` mp4/mov + 100 MiB; fps/duration/1080p on the worker |
+| FEAT-035 | **Cross-system audit fixes** | Done | Resend-OTP contract, atomic rate limit, ball-flight caps + auth, artifact whitelist, admin live statuses, CI runs tests (TASK-017) |
 
 ## Change log
 
@@ -178,3 +179,22 @@ High-level features. Detail lives in `tasks/`.
 - **3 Sep 2026 (FEAT-033):** Cancel on a running job stays `cancelled`. Progress
   writes cannot overwrite it. The worker finishes the current stage, skips the
   rest, and does not persist a delivery. The daily slot stays used.
+
+- **10 Sep 2026 (TASK-017, audit):** Cross-system audit of web, API, worker and
+  phone app. Fixed here: `POST /auth/resend-otp` expected a nested body
+  (`{"body": {...}, "purpose": ...}`) while both clients send the flat
+  `{email, purpose}` — every "resend code" tap was a 422; `optional_user`
+  now applies the same disabled / password-change rules as `current_user`;
+  `hit_rate_limit` is one atomic `$inc` instead of read-then-write;
+  `POST /balltrack/detect-stumps` requires a signed-in user and caps the still
+  at 15 MB; `POST /balltrack/sessions` caps clips at 180 MB (the worker's own
+  download cap) for both multipart and `source_key`; session/delivery
+  responses no longer spread the raw stored `artifacts` (worker filesystem
+  paths and object keys); `GET /deliveries` and `GET /balltrack/sessions`
+  clamp `limit` to 1–200; admin dashboard and in-progress list count
+  `claimed` as live; `list_analyses.total` comes from `count_documents`; CI
+  now runs on Python 3.12 and executes the unit tests (a `test_ec2_worker`
+  fixture had drifted and `cryptography` was missing from the local venv).
+  Deferred, unchanged: unauthenticated `/artifacts`, `/media`, `/balltrack/media`
+  file routes (signed artifact URLs — TASK-012), `drills.json` as on-disk
+  admin state, the Vercel config (production is EC2 + PM2).
